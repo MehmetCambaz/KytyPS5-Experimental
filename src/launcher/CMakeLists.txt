@@ -82,6 +82,7 @@ if(WIN32)
 			--no-system-dxc-compiler
 			--no-opengl-sw
 			--no-translations
+			--add-plugin-types iconengines
 		COMMENT "Deploying Qt runtime and TLS plugins"
 		VERBATIM
 	)
@@ -154,8 +155,12 @@ if(WIN32)
 				--no-system-dxc-compiler
 				--no-opengl-sw
 				--no-translations
-				--svg
+				--add-plugin-types iconengines
+			RESULT_VARIABLE _kyty_deploy_result
     		)
+		if(NOT _kyty_deploy_result EQUAL 0)
+			message(FATAL_ERROR "windeployqt failed with \${_kyty_deploy_result}")
+		endif()
     ")
 elseif(LINUX)
 	# Bundle the Qt runtime and plugins.
