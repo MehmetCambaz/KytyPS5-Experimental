@@ -1,7 +1,12 @@
-name: Build and Release KytyPS5
+name: Build and Release KytyPS5 Experimental
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish a prerelease after all platform builds and tests pass
+        type: boolean
+        default: false
   push:
     branches: [ main, master ]
   pull_request:
@@ -27,7 +32,7 @@ jobs:
         id: release_tag
         shell: bash
         run: |
-          echo "value=KytyPS5-$(date -u +'%Y-%m-%d')-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "value=KytyPS5-Experimental-$(date -u +'%Y-%m-%d')-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
   windows:
     name: Build KytyPS5 (Windows)
@@ -434,14 +439,17 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Release KytyPS5
+    name: Release KytyPS5 Experimental
     if: >-
       always() &&
-      github.event_name == 'push' &&
-      github.repository == 'KytyPS5/KytyPS5' &&
-      (needs.windows.result == 'success' ||
-       needs.macos.result == 'success' ||
-       needs.linux.result == 'success')
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'MehmetCambaz/KytyPS5-Experimental' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.publish_release == true &&
+      needs.metadata.result == 'success' &&
+      needs.windows.result == 'success' &&
+      needs.macos.result == 'success' &&
+      needs.linux.result == 'success'
     needs: [metadata, windows, macos, linux]
     runs-on: ubuntu-latest
     permissions:
@@ -525,6 +533,7 @@ jobs:
           else
             gh release create "$RELEASE_NAME" "${assets[@]}" \
               --generate-notes \
+              --prerelease \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "$RELEASE_NAME"
