@@ -341,6 +341,16 @@ void ValidateStorageTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	     descriptor.fields[5], descriptor.fields[6], descriptor.fields[7]);
 }
 
+// Limit a sampled array view to layers the shader can reach. Set KYTY_TEXTURE_LAYER_BOUND=0 to restore the
+// descriptor's complete layer range when diagnosing a compatibility problem.
+static uint32_t ArrayViewLayers(const ShaderRecompiler::IR::ImageResource& resource, uint32_t layers) {
+	static const bool bound = [] {
+		const char* value = std::getenv("KYTY_TEXTURE_LAYER_BOUND");
+		return value == nullptr || value[0] != '0';
+	}();
+	return bound && resource.max_array_index < layers ? resource.max_array_index + 1u : layers;
+}
+
 static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& resource,
                                      const ShaderTextureResource& descriptor, vk::Format format,
                                      const SurfaceFormatInfo& surface_format, bool storage,
@@ -378,7 +388,7 @@ static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& 
 			if (view.base_layer >= image_layers) {
 				EXIT("texture array base layer is out of bounds\n");
 			}
-			view.layer_count = image_layers - view.base_layer;
+			view.layer_count = ArrayViewLayers(resource, image_layers - view.base_layer);
 			break;
 		case ShaderRecompiler::Decoder::ImageDimension::Dim3D:
 			view.type        = vk::ImageViewType::e3D;
@@ -392,7 +402,7 @@ static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& 
 			if (view.base_layer >= image_layers) {
 				EXIT("texture array base layer is out of bounds\n");
 			}
-			view.layer_count = image_layers - view.base_layer;
+			view.layer_count = ArrayViewLayers(resource, image_layers - view.base_layer);
 			break;
 		case ShaderRecompiler::Decoder::ImageDimension::Dim2D:
 		case ShaderRecompiler::Decoder::ImageDimension::Dim2DMsaa:
