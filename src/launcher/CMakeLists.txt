@@ -159,7 +159,7 @@ if(WIN32)
 			RESULT_VARIABLE _kyty_deploy_result
     		)
 		if(NOT _kyty_deploy_result EQUAL 0)
-			message(FATAL_ERROR "windeployqt failed with \${_kyty_deploy_result}")
+			message(FATAL_ERROR \"windeployqt failed with \${_kyty_deploy_result}\")
 		endif()
     ")
 elseif(LINUX)
