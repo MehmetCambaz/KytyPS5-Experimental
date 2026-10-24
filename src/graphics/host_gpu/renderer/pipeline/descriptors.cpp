@@ -348,7 +348,7 @@ static uint32_t ArrayViewLayers(const ShaderRecompiler::IR::ImageResource& resou
 		const char* value = std::getenv("KYTY_TEXTURE_LAYER_BOUND");
 		return value == nullptr || value[0] != '0';
 	}();
-	return bound && resource.max_array_index < layers ? resource.max_array_index + 1u : layers;
+	return bound && !resource.cube && resource.max_array_index < layers ? resource.max_array_index + 1u : layers;
 }
 
 static ImageViewInfo TextureViewInfo(const ShaderRecompiler::IR::ImageResource& resource,
