@@ -453,10 +453,12 @@ jobs:
     name: Release KytyPS5 Experimental
     if: >-
       always() &&
-      github.event_name == 'workflow_dispatch' &&
       github.repository == 'MehmetCambaz/KytyPS5-Experimental' &&
       github.ref == 'refs/heads/main' &&
-      inputs.publish_release == true &&
+      (
+        (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) ||
+        (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish prerelease]'))
+      ) &&
       needs.metadata.result == 'success' &&
       needs.windows.result == 'success' &&
       needs.macos.result == 'success' &&

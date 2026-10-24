@@ -79,6 +79,34 @@ worth an isolated trial or is ready for promotion. Re-score after rebasing or
 meaningful test results, while retaining the earlier score in the dated local
 report. A low score alone never authorizes a merge or push.
 
+### Mixed-file and divergent-source changes
+
+Never replace an entire current file merely because a wanted change was made
+against a different version of that file. First identify the candidate's base
+commit and compare **base to candidate** to isolate what its author changed.
+Then compare the source base, source result, and this repository's current file
+so every additional difference is classified as one of:
+
+- required for the wanted change to compile or behave correctly;
+- an independent useful change worth reviewing as its own candidate;
+- an equivalent or competing implementation already present here; or
+- unrelated, obsolete, generated, or unsafe work that should not be imported.
+
+Preserve this repository's existing changes unless a reviewed replacement is
+intentional. Port the smallest semantic change instead of copying the whole
+source file. A clean cherry-pick or automatic three-way merge is only a tool;
+review the final resolved diff line by line, including nearby behavior that
+may have changed on either side. Never resolve a conflict by blindly choosing
+`ours` or `theirs`.
+
+If the wanted change depends on other source updates, record each dependency's
+source URL, SHA, human author, purpose, risk, and tests. Keep separable useful
+updates as separate candidates so the owner can accept, defer, or reject them
+individually. Combine dependencies only when they are genuinely inseparable,
+explain why, score and test the combined change, and include every substantive
+human author in the attribution trailers. Report unresolved semantic conflicts
+or missing dependencies instead of guessing.
+
 ## Required evidence before merging into `main`
 
 For each candidate, record the source URL, exact source commit SHA, source
@@ -202,7 +230,12 @@ regression remains unresolved. Tags and release assets must identify the
 experimental build and target SHA. Do not overwrite an existing release asset
 or move a published tag without separate explicit approval. Record how to
 withdraw the release or publish a corrective successor if a serious defect is
-found.
+found. Ordinary pushes remain build-only. After explicit approval for a named
+commit, the head commit may include the exact marker `[publish prerelease]` to
+let that push publish only after its Windows, Linux, and macOS jobs succeed.
+Never add the marker speculatively or reuse a release approval for another
+commit. Manual `workflow_dispatch` with `publish_release=true` remains the
+fallback and follows the same approval and exact-SHA gates.
 
 When proposing work back to the original project, follow its contribution
 rules: a focused game-related problem and evidence, Windows/Linux safety, and
