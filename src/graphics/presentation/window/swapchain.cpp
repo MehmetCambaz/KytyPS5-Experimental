@@ -332,6 +332,11 @@ struct Presenter::Impl {
 		frames.SetFormat(swapchain.Format());
 	}
 
+	// Set by the window thread after a fullscreen transition. The drawable size
+	// can remain unchanged, so the normal resize check cannot detect every
+	// transition that invalidates a wrapped or externally managed swapchain.
+	std::atomic_bool recreate_requested {false};
+
 	Image& ResolveSurface(const ImageInfo& info) {
 		TextureCache::ImageDesc desc {};
 		desc.info                  = info;
@@ -998,6 +1003,10 @@ RenderContext& Presenter::Renderer() const noexcept {
 	return m_impl->renderer;
 }
 
+void Presenter::RequestSwapchainRecreate() noexcept {
+	m_impl->recreate_requested.store(true, std::memory_order_release);
+}
+
 void Presenter::Present(Frame& frame) {
 	const Layer layer {&frame, 0, false};
 	Present(std::span(&layer, 1));
@@ -1038,7 +1047,9 @@ void Presenter::Impl::Present() {
 	const bool hdr_changed = main_frame != nullptr && !main_frame->blank &&
 	                         swapchain.SetHdr(main_frame->hdr);
 	// Some window systems keep presenting an old swapchain after a resize.
-	if (hdr_changed || swapchain.NeedsResize()) {
+	const bool force_recreate =
+	    recreate_requested.exchange(false, std::memory_order_acq_rel);
+	if (force_recreate || hdr_changed || swapchain.NeedsResize()) {
 		RecoverSwapchain(Swapchain::Status::Recreate);
 	}
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {

@@ -35,6 +35,7 @@ public:
 	[[nodiscard]] bool           IsHdrSupported() const noexcept;
 	[[nodiscard]] bool           NeedsSystemOverlayRefresh() const noexcept;
 	[[nodiscard]] RenderContext& Renderer() const noexcept;
+	void                         RequestSwapchainRecreate() noexcept;
 	void                         Present(Frame& frame);
 	void                         Present(std::span<const Layer> layers);
 	void                         ClearLayer(int bus);
