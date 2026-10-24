@@ -11,7 +11,7 @@ separate project and is never a destination for this workflow.
 
 | Source | Frequency | Use |
 | --- | --- | --- |
-| [`KytyPS5/KytyPS5` main](https://github.com/KytyPS5/KytyPS5) | Each requested run | Report commits since the last completed scan; sync locally only after owner approval. |
+| [`KytyPS5/KytyPS5` main](https://github.com/KytyPS5/KytyPS5) | Start of each requested run | Fetch and integrate new canonical `main` commits into local `main` automatically, without candidate review or separate approval. Never push that sync without the normal explicit push approval. |
 | [All upstream pull requests](https://github.com/KytyPS5/KytyPS5/pulls), including open, draft, merged, and closed-unmerged PRs | Enumerate metadata each run | Prioritize new or changed unaccepted PRs and queued older ones. Fetch discussion and CI details for plausible candidates. |
 | [Upstream issues](https://github.com/KytyPS5/KytyPS5/issues) and [weekly updates](https://github.com/KytyPS5/KytyPS5/discussions/862) | For relevant candidates | Check reproductions, known regressions, competing work, and maintainer direction. |
 | Public forks, including forks of forks | Refresh repository metadata when the request budget allows; inspect selected branch lists | Rank by recent `pushed_at`, stars, relevant PRs, and prior watchlist. Rotate the remaining forks. Report exact branch coverage rather than claiming all branches were checked. |
@@ -116,10 +116,15 @@ the observed failure and the expected result. For performance changes,
 record comparable before/after measurements, hardware, game/workload, and
 settings; avoid claims based on FPS alone.
 
-1. During a review scan, observe upstream commits without changing local Git
-   state. Once the owner selects a candidate, ask before fetching or editing
-   tracked files. Update from `upstream/main` and resolve conflicts before
-   testing. Never force-push `main` or rewrite published candidate history.
+1. At the start of every requested run, fetch `KytyPS5/KytyPS5:main` and
+   integrate it into local `main` automatically. Fast-forward when possible;
+   otherwise create a normal merge so experimental history is preserved. The
+   canonical upstream sync does not need candidate review or separate owner
+   approval. If conflicts occur, stop the automatic sync and report them
+   before resolving ambiguous behavior. Never push the sync without the
+   mandatory explicit single-use push approval, force-push `main`, or rewrite
+   published candidate history. Review all PR and fork candidates against the
+   resulting local upstream baseline.
 2. After approval, create one `candidate/<short-topic>` branch per coherent
    runtime, GPU, shader, memory, dependency, packaging, or otherwise broad
    change. Test-only, documentation, CI, or narrowly scoped low-risk changes
@@ -135,8 +140,9 @@ settings; avoid claims based on FPS alone.
    address; never invent or guess an email. Preserve the original source URL
    and exact SHA in the commit message as `Source:` and `Source-SHA:` trailers.
    Adapted or follow-up commits must co-author the original human contributor
-   when they retain or modify that contributor's work. Do not use an AI or bot
-   identity as a substitute for the actual person. Apply this rule to every
+   when they retain or modify that contributor's work. Never list Codex,
+   Claude, another AI system, or a bot as an Author or `Co-authored-by` entry;
+   list every substantive human contributor instead. Apply this rule to every
    future integration commit; do not force-push or rewrite already published
    history solely to retrofit a missing trailer. Record any legacy exception
    in the ignored local audit log.
@@ -262,9 +268,14 @@ review the entire historical backlog. Later runs prioritize changes since the
 last completed inventory and queued items. A partial inventory does not
 advance the completed checkpoint.
 
-1. Observe `KytyPS5/KytyPS5:main` and identify commits since the checkpoint.
-   Check whether upstream has incorporated a tracked candidate. Do not fetch
-   or edit the integration checkout during the scan.
+1. Fetch `KytyPS5/KytyPS5:main`, identify commits since the checkpoint, and
+   integrate them into local `main` under the automatic canonical-sync rule
+   above. Check whether upstream has incorporated a tracked candidate. Record
+   the exact upstream SHA and resulting local merge or fast-forward SHA. This
+   is the only routine Git mutation allowed before the candidate report;
+   candidate branches, commits, merges, tracked edits, and pushes remain
+   outside the read-only review stage unless the owner separately requests
+   them.
 2. Page through upstream PR metadata with `state=all`, `per_page=100`, and
    GitHub's `Link` header. Record draft/open/closed/merged state, base and head
    repository, branch, SHA, and update time. Compare with the ledger. Open and
