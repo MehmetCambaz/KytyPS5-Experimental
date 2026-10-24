@@ -132,7 +132,12 @@ void FaultManager::ProcessFaultBuffer() {
 		m_download_buffer.Invalidate(offset, PageFaultAreaSize);
 		RangeSet    fault_ranges;
 		const auto* faults = std::bit_cast<const uint64_t*>(mapped);
-		const auto  count  = static_cast<uint32_t>(faults[0]);
+		// The compute parser counts every faulting page but stores records only in
+		// entries 1..MaxPageFaults - 1. Clamp before narrowing so a corrupted or
+		// wrapped counter cannot make the CPU read into another area or beyond the
+		// download buffer. Omitted pages fault again on their next access.
+		const auto count =
+		    static_cast<uint32_t>(std::min<uint64_t>(faults[0], MaxPageFaults - 1));
 		for (uint32_t index = 1; index <= count; ++index) {
 			const auto address = BufferCache::GuestAddress(faults[index]);
 			fault_ranges.Add(address, BufferCache::CACHING_PAGESIZE);
