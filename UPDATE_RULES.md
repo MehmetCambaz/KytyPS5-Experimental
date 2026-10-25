@@ -168,11 +168,16 @@ settings; avoid claims based on FPS alone.
    launcher, installer, dependency, or packaging changes, inspect the produced
    artifact for required executables, libraries, plugins, and licenses and run
    the smallest practical launch or `--help` smoke test.
-7. Batch only independent low-risk changes, with no more than three candidates
-   in one validation batch. Keep broad or elevated-risk changes alone. Record
-   a result and risk score for each candidate even when tested together. If a
-   batch fails, stop adding work and isolate, revert, or repair the failure
-   before continuing. Do not layer new candidates onto a failing `main`.
+7. There is no fixed numerical limit on a validation or promotion batch.
+   Choose the batch by technical coherence, interaction risk, reviewability,
+   rollback clarity, and the available test coverage. Multiple candidates may
+   be integrated together when their combined diff can be reviewed and their
+   individual effects can still be evaluated. Isolate a change only when its
+   risk, scope, dependencies, conflicts, or required hardware make combined
+   validation unreliable. Record a result and risk score for each candidate
+   even when tested together. If a batch fails, stop adding work and isolate,
+   revert, or repair the failure before continuing. Do not layer new
+   candidates onto a failing `main`.
 8. Prepare a reviewable local change with provenance, evidence, test results,
    known limitations, and the rollback plan. Ask the owner before staging,
    committing, merging, each push, PR creation, or any other remote write.

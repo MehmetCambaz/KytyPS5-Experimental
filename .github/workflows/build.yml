@@ -524,30 +524,39 @@ jobs:
           tar -C "$linux_dir" -czf \
             "$GITHUB_WORKSPACE/$RELEASE_NAME-Linux-x86_64.tar.gz" .
 
+      - name: Verify release files
+        shell: bash
+        run: |
+          assets=(
+            "$RELEASE_NAME-Windows-x64.zip"
+            "$RELEASE_NAME-macOS-x86_64.zip"
+            "$RELEASE_NAME-Linux-x86_64.tar.gz"
+          )
+          for asset in "${assets[@]}"; do
+            test -s "$asset"
+          done
+          sha256sum "${assets[@]}" > "$RELEASE_NAME-SHA256SUMS.txt"
+          test "$(wc -l < "$RELEASE_NAME-SHA256SUMS.txt")" -eq 3
+          cat "$RELEASE_NAME-SHA256SUMS.txt"
+
       - name: Create release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          assets=()
-          for artifact in \
+          assets=(
             "$RELEASE_NAME-Windows-x64.zip" \
             "$RELEASE_NAME-macOS-x86_64.zip" \
-            "$RELEASE_NAME-Linux-x86_64.tar.gz"; do
-            if [[ -f "$artifact" ]]; then
-              assets+=("$artifact")
-            fi
-          done
-          test "${#assets[@]}" -gt 0
+            "$RELEASE_NAME-Linux-x86_64.tar.gz" \
+            "$RELEASE_NAME-SHA256SUMS.txt"
+          )
           if gh release view "$RELEASE_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            gh release upload "$RELEASE_NAME" "${assets[@]}" \
-              --clobber \
-              --repo "$GITHUB_REPOSITORY"
-          else
-            gh release create "$RELEASE_NAME" "${assets[@]}" \
-              --generate-notes \
-              --prerelease \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "$RELEASE_NAME"
+            echo "Release $RELEASE_NAME already exists; refusing to overwrite its files." >&2
+            exit 1
           fi
+          gh release create "$RELEASE_NAME" "${assets[@]}" \
+            --generate-notes \
+            --prerelease \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_NAME"
