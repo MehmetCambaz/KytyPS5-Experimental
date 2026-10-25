@@ -43,10 +43,12 @@ the implementation should fix the underlying behavior rather than special
 case a title ID. Useful launcher and diagnostic fixes also qualify when their
 behavior can be verified.
 
-**Trial on an isolated branch** when the change is broad, changes shader/GPU
-semantics or memory ownership, depends on several unmerged PRs, changes a
-submodule/dependency, or lacks coverage on a primary platform. State what
-result would justify promotion to `main` and what would cause rejection.
+**Integrate cautiously into local `main`** when the change is broad, changes
+shader/GPU semantics or memory ownership, depends on several unmerged PRs,
+changes a submodule/dependency, or lacks coverage on a primary platform. Keep
+the work in focused commits with a clear rollback order, state the evidence
+needed before an approved push, and state what result would require a normal
+revert. Never create a separate update or candidate branch.
 
 **Reject or defer** changes that:
 
@@ -123,13 +125,12 @@ settings; avoid claims based on FPS alone.
    approval. If conflicts occur, stop the automatic sync and report them
    before resolving ambiguous behavior. Never push the sync without the
    mandatory explicit single-use push approval, force-push `main`, or rewrite
-   published candidate history. Review all PR and fork candidates against the
-   resulting local upstream baseline.
-2. After approval, create one `candidate/<short-topic>` branch per coherent
-   runtime, GPU, shader, memory, dependency, packaging, or otherwise broad
-   change. Test-only, documentation, CI, or narrowly scoped low-risk changes
-   may use a fast path, but still require a reviewable commit, exact-SHA
-   validation, and the pre-push checks below. Prefer a focused cherry-pick with
+   published history. Review all PR and fork candidates against the resulting
+   local upstream baseline.
+2. After approval, apply every reviewed update directly to local `main`.
+   Never create or use a separate update, trial, topic, or candidate branch.
+   Keep broad work reviewable through focused commits, ordered validation, and
+   an explicit rollback sequence on `main`. Prefer a focused cherry-pick with
    `git cherry-pick -x` when it applies cleanly. Otherwise port the minimal
    patch. Do not merge an entire third-party branch merely to obtain one fix.
 3. Preserve authorship in both Git metadata and the commit message. Every
@@ -160,38 +161,40 @@ settings; avoid claims based on FPS alone.
    actually executed and passed. Building a test executable is not evidence
    that the test ran. Record skipped, filtered, unsupported, and hardware-only
    tests with the reason and resulting evidence gap.
-6. CI evidence must match the exact candidate SHA. Upstream or source-repository
-   CI is supporting evidence only. A rebase, conflict resolution, local port,
-   packaging adjustment, or follow-up commit invalidates source CI as proof of
-   the final patch. Run this fork's relevant jobs on the exact candidate SHA
-   before promotion to `main`, and confirm the run reports that SHA. For
-   launcher, installer, dependency, or packaging changes, inspect the produced
-   artifact for required executables, libraries, plugins, and licenses and run
-   the smallest practical launch or `--help` smoke test.
+6. Upstream or source-repository CI is supporting evidence only. A rebase,
+   conflict resolution, local port, packaging adjustment, or follow-up commit
+   invalidates source CI as proof of the final patch. Before an approved push,
+   validate the exact local `main` tree with the strongest practical local
+   build and affected tests. The approved push goes directly to `origin/main`;
+   confirm this fork's Windows, Linux, and macOS jobs report that exact pushed
+   SHA afterward. Release publication must remain gated on every required job
+   succeeding. For launcher, installer, dependency, or packaging changes,
+   inspect the produced artifact for required executables, libraries, plugins,
+   and licenses and run the smallest practical launch or `--help` smoke test.
 7. There is no fixed numerical limit on a validation or promotion batch.
    Choose the batch by technical coherence, interaction risk, reviewability,
    rollback clarity, and the available test coverage. Multiple candidates may
    be integrated together when their combined diff can be reviewed and their
-   individual effects can still be evaluated. Isolate a change only when its
-   risk, scope, dependencies, conflicts, or required hardware make combined
-   validation unreliable. Record a result and risk score for each candidate
-   even when tested together. If a batch fails, stop adding work and isolate,
-   revert, or repair the failure before continuing. Do not layer new
-   candidates onto a failing `main`.
+   individual effects can still be evaluated. When combined validation would
+   be unreliable, separate the work into focused commits and test groups on
+   local `main`, not separate branches. Record a result and risk score for each
+   candidate even when tested together. If a batch fails, stop adding work and
+   revert or repair the failure before continuing. Do not layer new candidates
+   onto a failing `main`.
 8. Prepare a reviewable local change with provenance, evidence, test results,
    known limitations, and the rollback plan. Ask the owner before staging,
    committing, merging, each push, PR creation, or any other remote write.
    Every push approval is single-use and must name the remote, destination
-   branch, exact commit or range, and purpose. Approval to push a candidate for
-   CI does not authorize a later push to `main`, and merge approval does not
-   authorize a release. After authorization, use a PR for isolated or risky
-   changes; a human reviews the code and decides promotion. Do not enable
+   branch, exact commit or range, and purpose. Every update push destination is
+   `origin/main`; approval for one exact `main` push cannot be reused for a
+   later push, and merge approval does not authorize a release. Do not enable
    automatic merging of raw fork branches or AI-selected candidates.
-9. Treat a failed required job as a blocked promotion. Save the failing run and
-   logs, identify the candidate responsible, and either repair it on its
-   candidate branch or prepare a normal revert. Never rewrite published
-   history to hide a failure. A rollback plan must name the commits to revert,
-   the user-visible effect, and any saved-data or compatibility consequences.
+9. Treat a failed required job on pushed `main` as a stop condition. Save the
+   failing run and logs, identify the responsible commit, and repair it on
+   local `main` or prepare a normal revert commit for `main`. Never rewrite
+   published history to hide a failure. Do not add unrelated updates while
+   `main` is failing. A rollback plan must name the commits to revert, the
+   user-visible effect, and any saved-data or compatibility consequences.
 10. After an upstream sync, recheck adopted patches. If upstream later lands
    the same fix, avoid duplicate work and resolve any conflicts against the
    upstream version. Keep source attribution in the history.
@@ -217,10 +220,11 @@ local commit set changes after approval, stop and obtain fresh approval.
 5. Review the exact outgoing commit range and its file summary. Verify every
    third-party change has durable `Source`, `Source-SHA`, and human
    `Co-authored-by` trailers and that no unrelated commit is included.
-6. Run `git diff --check` and the smallest meaningful local validation. For a
-   promotion to `main`, verify required fork CI and affected tests passed on
-   the exact candidate SHA. A candidate-branch push whose stated purpose is to
-   obtain CI may proceed only with that limitation stated in the approval.
+6. Run `git diff --check` and the strongest practical local validation for the
+   exact local `main` tree. Record which affected tests actually ran and any
+   platform or hardware gaps. The approved push must target `origin/main`;
+   afterward verify required fork CI reports the exact pushed SHA. A failed
+   required job blocks further updates and triggers repair or normal revert.
 7. Present the owner with the remote, destination branch, current remote SHA,
    exact outgoing commits, files changed, validation status, known failures,
    whether CI or a release will start, and whether the push is fast-forward.
@@ -254,13 +258,13 @@ human-written repository communication with disclosure of AI assistance.
 
 ## Repository controls to enable
 
-Protect `main` from force pushes and deletion, require changes to arrive by
-pull request, and require resolved review conversations. Once this repository's
-own Windows and Linux CI jobs have passed reliably, make those checks required
-before merge. Require macOS CI for changes to macOS or shared code when its
-runner is available. A solo owner should not require an approval from a second
-person until a reviewer with write access exists; keep the human review step
-in this policy meanwhile. Do not enable auto-merge for candidate PRs.
+Protect `main` from force pushes and deletion while allowing the owner's
+explicitly approved direct update pushes. Monitor every pushed SHA with this
+repository's Windows and Linux jobs and require macOS CI for macOS or shared
+code when its runner is available. A solo owner should not require an approval
+from a second person until a reviewer with write access exists; keep the human
+review step in this policy meanwhile. Do not enable automatic merging of raw
+fork work.
 
 ## On-demand change review contract
 
@@ -278,9 +282,10 @@ advance the completed checkpoint.
    above. Check whether upstream has incorporated a tracked candidate. Record
    the exact upstream SHA and resulting local merge or fast-forward SHA. This
    is the only routine Git mutation allowed before the candidate report;
-   candidate branches, commits, merges, tracked edits, and pushes remain
-   outside the read-only review stage unless the owner separately requests
-   them.
+   other commits, merges, tracked edits, and pushes remain outside the
+   read-only review stage unless the owner separately requests them. Never
+   create a separate branch for an update; approved integration happens only
+   on local `main`.
 2. Page through upstream PR metadata with `state=all`, `per_page=100`, and
    GitHub's `Link` header. Record draft/open/closed/merged state, base and head
    repository, branch, SHA, and update time. Compare with the ledger. Open and
