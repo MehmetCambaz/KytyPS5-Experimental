@@ -229,7 +229,7 @@ static int32_t KYTY_SYSV_ABI JpegEncEncode(void* handle, const JpegEncEncodePara
 } // namespace JpegEnc
 
 LIB_DEFINE(InitJpegEnc_1) {
-	PRINT_NAME_ENABLE(true);
+	PRINT_NAME_ENABLE_ALL(true);
 
 	LIB_FUNC("o6ZgXfFdWXQ", JpegEnc::JpegEncQueryMemorySize);
 	LIB_FUNC("K+rocojkr-I", JpegEnc::JpegEncCreate);

@@ -7,7 +7,30 @@
 #include "common/threads.h"
 #include "loader/timer.h" // IWYU pragma: keep
 
+#include <atomic>
+#include <cstddef>
 #include <fmt/format.h>
+
+namespace Libs {
+
+// A library is commonly split across translation units, while LIB_DEFINE runs once on the
+// initialization thread. Keying this shared flag by the library name lets every unit and guest
+// thread start with the tracing choice made by LIB_DEFINE.
+template <std::size_t N>
+struct PrintNameKey {
+	char value[N] {};
+	consteval PrintNameKey(const char (&text)[N]) { // NOLINT(google-explicit-constructor)
+		for (std::size_t i = 0; i < N; i++) value[i] = text[i];
+	}
+};
+
+template <std::size_t N>
+PrintNameKey(const char (&)[N]) -> PrintNameKey<N>;
+
+template <PrintNameKey Library>
+inline std::atomic<bool> g_print_name_shared {false};
+
+} // namespace Libs
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define PRINT_NAME_ENABLED g_print_name
@@ -16,12 +39,25 @@
 #define PRINT_NAME_ENABLE(flag) PRINT_NAME_ENABLED = flag;
 
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define PRINT_NAME_SHARED ::Libs::g_print_name_shared<g_print_name_key>
+
+// Set both this thread's flag and the default observed by other threads and translation units.
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define PRINT_NAME_ENABLE_ALL(flag)                                                                \
+	do {                                                                                           \
+		PRINT_NAME_SHARED.store((flag), std::memory_order_relaxed);                                \
+		PRINT_NAME_ENABLE(flag)                                                                    \
+	} while (false)
+
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_DEFINE(name) void name(Loader::SymbolDatabase* s)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_NAME(l, m)                                                                             \
-	[[maybe_unused]] static thread_local bool PRINT_NAME_ENABLED = false;                          \
-	static constexpr char                     g_library[]        = l;                              \
-	static constexpr char                     g_module[]         = m;
+	static constexpr auto                     g_print_name_key = ::Libs::PrintNameKey {l};         \
+	[[maybe_unused]] static thread_local bool PRINT_NAME_ENABLED =                                 \
+	    PRINT_NAME_SHARED.load(std::memory_order_relaxed);                                         \
+	static constexpr char g_library[] = l;                                                         \
+	static constexpr char g_module[]  = m;
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define LIB_VERSION(l, lv, m, mv1, mv2)                                                            \
 	LIB_NAME(l, m);                                                                                \

@@ -390,7 +390,7 @@ static int32_t KYTY_SYSV_ABI JpegDecDecode(void* handle, const JpegDecDecodePara
 } // namespace JpegDec
 
 LIB_DEFINE(InitJpegDec_1) {
-	PRINT_NAME_ENABLE(true);
+	PRINT_NAME_ENABLE_ALL(true);
 
 	LIB_FUNC("uNAUmANZMEw", JpegDec::JpegDecQueryMemorySize);
 	LIB_FUNC("JPh3Zgg0Zwc", JpegDec::JpegDecCreate);
