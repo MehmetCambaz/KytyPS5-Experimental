@@ -512,6 +512,44 @@ uint32_t UnpackImageGather(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uin
 	                                   (selector - 4u) % info.component_count);
 }
 
+// Vulkan does not require one- or two-channel sRGB formats. Those guest formats use UNORM host
+// images, so sampling needs the transfer function that a native sRGB sampler would have applied.
+uint32_t DecodeImageSrgb(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint32_t texel,
+                         bool gather) {
+	auto& state = ctx.state;
+	if (!state.program.info.images[mem.resource].srgb_decode) return texel;
+
+	const auto f32       = TypeF32(state);
+	const auto boolean   = TypeBool(state);
+	const auto threshold = ConstantF32Value(state, 0.04045F);
+	const auto inv_slope = ConstantF32Value(state, 1.0F / 12.92F);
+	const auto offset    = ConstantF32Value(state, 0.055F);
+	const auto inv_scale = ConstantF32Value(state, 1.0F / 1.055F);
+	const auto gamma     = ConstantF32Value(state, 2.4F);
+	const auto decoded_components = gather ? 4u : 3u;
+	uint32_t components[4] {};
+	for (uint32_t component = 0; component < 4u; component++) {
+		const auto value = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, f32, value, texel, component);
+		if (component >= decoded_components) {
+			components[component] = value;
+			continue;
+		}
+		const auto low = Binary(state, spv::OpFMul, f32, value, inv_slope);
+		const auto biased = Binary(
+		    state, spv::OpFMul, f32,
+		    Binary(state, spv::OpFAdd, f32, value, offset), inv_scale);
+		const auto high = EmitGlsl<GLSLstd450Pow, IR::Type::F32>(state, biased, gamma);
+		const auto use_low =
+		    Binary(state, spv::OpFOrdLessThanEqual, boolean, value, threshold);
+		components[component] = Select(state, f32, use_low, low, high);
+	}
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 4), result,
+	                          components[0], components[1], components[2], components[3]);
+	return result;
+}
+
 uint32_t SamplePackedUnormLz(ValueEmitContext& ctx, const IR::MemoryInfo& mem, uint32_t coord) {
 	auto& state = ctx.state;
 	const auto& image = state.program.info.images[mem.resource];
@@ -777,6 +815,7 @@ uint32_t EmitImageResult(ValueEmitContext& ctx, const IR::Inst& inst, const Emit
 	const auto& mem = ctx.Memory(inst);
 	const auto& image = state.program.info.images[mem.resource];
 	const bool gather = inst.GetOpcode() == IR::ValueOpcode::ImageGatherRaw;
+	const bool sampled = inst.GetOpcode() == IR::ValueOpcode::ImageSampleRaw || gather;
 	const bool dref = HasFlag(mem, Decoder::ImageSampleFlagCompare);
 	const bool scalar = dref && !gather;
 	const bool mixed = std::ranges::any_of(image.indirect_resources, [&](uint32_t resource) {
@@ -793,6 +832,7 @@ uint32_t EmitImageResult(ValueEmitContext& ctx, const IR::Inst& inst, const Emit
 		if (!scalar) {
 			value = gather ? UnpackImageGather(ctx, candidate_mem, value)
 			               : UnpackImageTexel(ctx, candidate_mem, value);
+			if (sampled) value = DecodeImageSrgb(ctx, candidate_mem, value, gather);
 		}
 		return ResultVector(ctx, value,
 		                    dref ? Prospero::TextureNumericClass::Float
@@ -1000,7 +1040,9 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 				const auto coord = CoordF32(ctx, mem, *address, layout.coord,
 				                            dimension_info.coordinate_components, image.cube);
 				const auto sample = EmitOneDimensionalGatherLz(ctx, mem, coord, numeric_class);
-				ctx.Define(inst, ResultVector(ctx, UnpackImageGather(ctx, mem, sample),
+				ctx.Define(inst, ResultVector(ctx,
+				                              DecodeImageSrgb(
+				                                  ctx, mem, UnpackImageGather(ctx, mem, sample), true),
 				                              numeric_class, false, mem, true));
 				return;
 			}

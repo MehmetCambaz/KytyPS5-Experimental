@@ -542,19 +542,23 @@ void TestImageHeapKinds() {
   const auto float_kind = kind_of(Format::k32_32_32_32Float, Type::kColor2DArray);
   const auto uint_kind = kind_of(Format::k32UInt, Type::kColor2DArray);
   const auto cube_kind = kind_of(Format::k32_32_32_32Float, Type::kCube);
+  const auto srgb_kind = kind_of(Format::k8Srgb, Type::kColor2DArray);
   auto volume = descriptor(Format::k32_32_32_32Float, Type::kColor3D);
-  Check(float_kind != 0u && uint_kind != 0u && cube_kind != 0u && float_kind != uint_kind &&
+  Check(float_kind != 0u && uint_kind != 0u && cube_kind != 0u && srgb_kind != 0u &&
+            float_kind != uint_kind && float_kind != srgb_kind &&
             float_kind != cube_kind && kind_of(Format::kInvalid, Type::kColor2DArray) == 0u &&
             ImageHeapKind(root, volume) == 0u &&
             std::ranges::all_of(volume.dwords, [](uint32_t word) { return word == 0u; }),
         "heap kinds did not separate typed entries or null mismatched ones");
   const auto resource = ImageHeapResource(root, uint_kind);
   const auto cube_resource = ImageHeapResource(root, cube_kind);
+  const auto srgb_resource = ImageHeapResource(root, srgb_kind);
   auto other = root;
   other.source = 9u;
   Check(resource.numeric_class == Libs::Graphics::Prospero::TextureNumericClass::Uint &&
-            !resource.cube && cube_resource.cube &&
+            !resource.cube && !resource.srgb_decode && cube_resource.cube &&
             cube_resource.numeric_class == Libs::Graphics::Prospero::TextureNumericClass::Float &&
+            srgb_resource.srgb_decode && !srgb_resource.cube &&
             resource.resource_class == ImageResourceClass::Sampled && resource.read &&
             ImageHeapResource(root, 0u) == ImageHeapResource(other, 0u),
         "heap kind resources lost their type or kept root identity");
@@ -8356,6 +8360,47 @@ void TestBufferSwizzleSpecialization() {
         "buffer swizzle change did not select a new specialization key");
 }
 
+void TestNarrowSrgbImageDecode() {
+  using Format = Libs::Graphics::Prospero::BufferFormat;
+  using ImageType = Libs::Graphics::Prospero::ImageType;
+  Fixture fixture;
+  std::array<Value, 8> words;
+  for (uint32_t index = 0; index < words.size(); ++index)
+    words[index] = fixture.UserData(index);
+  const auto image = fixture.Image(words, 4);
+  const auto sampler = fixture.Sampler({Value(0u), Value(0u), Value(0u), Value(0u)}, 4);
+  MemoryInfo memory;
+  memory.kind = ResourceKind::Image;
+  memory.image_dimension = Decoder::ImageDimension::Dim2D;
+  fixture.Emit(ValueOpcode::ImageSampleRaw,
+               {image, sampler, fixture.ImageAddress(), Value(true)},
+               fixture.AddMemory(memory, 4));
+  fixture.PlanAndTrack();
+  const auto plan = ExtractResourcePlan(fixture.program);
+
+  const auto descriptor = [](Format format) {
+    std::array<uint32_t, 8> words{};
+    words[0] = 0x1000u;
+    words[1] = static_cast<uint32_t>(format) << 20u;
+    words[2] = 3u | (3u << 14u);
+    words[3] = Libs::Graphics::DstSel(4, 5, 6, 7) |
+               (static_cast<uint32_t>(ImageType::kColor2D) << 28u);
+    return words;
+  };
+  ResourceSnapshot snapshot;
+  ResourceSpecialization narrow;
+  auto user_data = descriptor(Format::k8_8Srgb);
+  Check(MaterializeResources(plan, {.user_data = user_data}, snapshot, narrow) &&
+            narrow.images.size() == 1u && narrow.images[0].srgb_decode,
+        "narrow sRGB image did not request shader decoding");
+
+  ResourceSpecialization wide;
+  user_data = descriptor(Format::k8_8_8_8Srgb);
+  Check(MaterializeResources(plan, {.user_data = user_data}, snapshot, wide) &&
+            wide.images.size() == 1u && !wide.images[0].srgb_decode && wide != narrow,
+        "native four-channel sRGB did not select its own specialization");
+}
+
 enum class ConditionalBufferUse { Optional, Shared, Loop, Writable };
 
 ResourcePlan ConditionalBufferPlan(ConditionalBufferUse use) {
@@ -9005,6 +9050,7 @@ int main() {
     Run("DMA address materialization", TestDmaAddressMaterialization);
     Run("dynamic FLAT address", TestDynamicFlatAddressesUseDma);
     Run("buffer swizzle specialization", TestBufferSwizzleSpecialization);
+    Run("narrow sRGB image decode", TestNarrowSrgbImageDecode);
     Run("conditional buffer materialization", TestConditionalBufferMaterialization);
     Run("guarded scalar descriptor reads", TestGuardedScalarDescriptorReads);
     Run("conservative buffer reachability", TestConservativeBufferReachability);

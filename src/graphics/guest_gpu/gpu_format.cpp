@@ -245,4 +245,8 @@ BufferFormat RemapTextureFormat(BufferFormat format) {
 	}
 }
 
+bool TextureNeedsShaderSrgbDecode(BufferFormat format) {
+	return format == BufferFormat::k8Srgb || format == BufferFormat::k8_8Srgb;
+}
+
 } // namespace Libs::Graphics::Prospero

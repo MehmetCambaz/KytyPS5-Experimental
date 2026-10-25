@@ -919,6 +919,7 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			                static_cast<uint32_t>(format)));
 		}
 		const bool storage      = base.resource_class == ImageResourceClass::Storage;
+		image.srgb_decode       = !storage && Prospero::TextureNeedsShaderSrgbDecode(format);
 		image.fmask             = Prospero::IsFmaskTextureFormat(format);
 		if (image.fmask) {
 			if (storage || base.depth_compare ||
@@ -1052,6 +1053,7 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 				image.mip_count         = image_class.mip_count;
 				image.conversion_format = image_class.conversion_format;
 				image.shader_swizzle    = image_class.shader_swizzle;
+				image.srgb_decode       = image_class.srgb_decode;
 				image.cube              = image_class.cube;
 			}
 			const bool same_coordinates = image.dimension == image_class.dimension &&
@@ -1063,6 +1065,7 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			if ((!same_coordinates && !(is_2d(image.dimension) && is_2d(image_class.dimension)) &&
 			     !unfiltered_coordinates) ||
 			    image.conversion_format != image_class.conversion_format ||
+			    image.srgb_decode != image_class.srgb_decode ||
 			    (!storage_swizzle && image.shader_swizzle != image_class.shader_swizzle)) {
 				return SpecializationFail(
 				    fmt::format("indirect image table at pc 0x{:08x} has incompatible candidates",
@@ -1634,6 +1637,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		    .mip_count = image.mip_count,
 		    .conversion_format = image.conversion_format,
 		    .shader_swizzle = image.shader_swizzle,
+		    .srgb_decode = image.srgb_decode,
 		    .indirect_root = image.indirect_root,
 		    .indirect_mapping_offset = image.indirect_mapping_offset,
 		    .indirect_search_iterations = image.indirect_search_iterations,
@@ -1728,7 +1732,9 @@ uint32_t ImageHeapKind(const ImageResource& root, DescriptorValue& value) {
 		value.dwords.fill(0u);
 		return 0u;
 	}
-	return 1u + static_cast<uint32_t>(numeric_class) * 2u + (DescriptorIsCube(value) ? 1u : 0u);
+	const auto cube = DescriptorIsCube(value) ? 1u : 0u;
+	const auto srgb = Prospero::TextureNeedsShaderSrgbDecode(format) ? 1u : 0u;
+	return 1u + (static_cast<uint32_t>(numeric_class) * 2u + cube) * 2u + srgb;
 }
 
 ImageResource ImageHeapResource(const ImageResource& root, uint32_t kind) {
@@ -1741,8 +1747,11 @@ ImageResource ImageHeapResource(const ImageResource& root, uint32_t kind) {
 	resource.depth_compare          = root.depth_compare;
 	resource.r128                   = root.r128;
 	if (kind != 0u) {
-		resource.numeric_class = static_cast<Prospero::TextureNumericClass>((kind - 1u) / 2u);
-		resource.cube          = ((kind - 1u) & 1u) != 0u;
+		auto code              = kind - 1u;
+		resource.srgb_decode   = (code & 1u) != 0u;
+		code                 >>= 1u;
+		resource.cube          = (code & 1u) != 0u;
+		resource.numeric_class = static_cast<Prospero::TextureNumericClass>(code / 2u);
 	}
 	return resource;
 }
@@ -1793,6 +1802,7 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		image.mip_count                  = source.mip_count;
 		image.conversion_format          = source.conversion_format;
 		image.shader_swizzle             = source.shader_swizzle;
+		image.srgb_decode                = source.srgb_decode;
 		image.indirect_root              = source.indirect_root;
 		image.indirect_mapping_offset    = source.indirect_mapping_offset;
 		image.indirect_search_iterations = source.indirect_search_iterations;
