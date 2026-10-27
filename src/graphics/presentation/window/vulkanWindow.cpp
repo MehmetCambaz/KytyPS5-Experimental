@@ -30,6 +30,7 @@
 #include <fmt/format.h>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <vulkan/vk_platform.h>
 
@@ -846,6 +847,16 @@ static void VulkanGetExtensions(VulkanExtensions& r) {
 	}
 }
 
+static bool VulkanIsUnknownPNextStructMessage(const vk::DebugUtilsMessengerCallbackDataEXT* data) {
+	if (data->pMessageIdName == nullptr || data->pMessage == nullptr) {
+		return false;
+	}
+	std::string_view id(data->pMessageIdName);
+	std::string_view suffix = "-pNext-pNext";
+	return id.size() >= suffix.size() && id.substr(id.size() - suffix.size()) == suffix &&
+	       strstr(data->pMessage, "unknown VkStructureType") != nullptr;
+}
+
 static VKAPI_ATTR vk::Bool32 VKAPI_CALL VulkanDebugMessengerCallback(
     vk::DebugUtilsMessageSeverityFlagBitsEXT      message_severity,
     vk::DebugUtilsMessageTypeFlagsEXT             message_types,
@@ -887,7 +898,8 @@ static VKAPI_ATTR vk::Bool32 VKAPI_CALL VulkanDebugMessengerCallback(
 			// Only validation errors are fatal; GENERAL-type errors can come
 			// from unrelated loader/layer issues (e.g. a broken overlay).
 			error = static_cast<bool>(message_types &
-			                          vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation);
+			                          vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation) &&
+			        !VulkanIsUnknownPNextStructMessage(callback_data);
 			break;
 		default: severity_str = "?";
 	}
