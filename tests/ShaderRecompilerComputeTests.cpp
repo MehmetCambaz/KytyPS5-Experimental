@@ -48636,6 +48636,19 @@ void CheckTessellationPrograms() {
   CheckTessellationProgram("TessellationShiftedStride", 124, 128);
   CheckTessellationProgram("TessellationMultipliedStride", 108, 112);
   CheckTessellationPatchConstants();
+
+  ShaderVertexInputInfo local;
+  local.logical_stage = ShaderType::Local;
+  local.tess = {.input_control_points = 3, .output_control_points = 3,
+                .ls_stride = 124, .hs_stride = 128};
+  std::vector<u32> three_point_key;
+  BuildStageStaticKey(local, three_point_key);
+  local.tess.input_control_points = 4;
+  std::vector<u32> four_point_key;
+  BuildStageStaticKey(local, four_point_key);
+  Require("TessellationLocalStageKey", "input control points",
+          three_point_key != four_point_key,
+          "local programs with different patch counts shared one shader key");
 }
 
 void CheckEmbeddedFetchVertexOffset() {
