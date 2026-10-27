@@ -17427,6 +17427,28 @@ public:
       Require(name, "disabled tests with stale depth write enable",
               !disabled_depth.image_id,
               "a dormant depth write bit bound a depth attachment");
+      HW::DepthControl inert_depth_control{};
+      inert_depth_control.z_enable = true;
+      inert_depth_control.zfunc = static_cast<uint8_t>(vk::CompareOp::eAlways);
+      registers.SetDepthControl(inert_depth_control);
+      auto inert_mip_target = phased_depth_target;
+      inert_mip_target.depth_view.current_mip_level = 1;
+      registers.SetDepthRenderTarget(inert_mip_target);
+      RenderDepthInfo inert_mip_depth{};
+      RenderExecutorTestAccess::ResolveRenderDepthTarget(
+          executor, scheduler.Current(), inert_mip_depth);
+      Require(name, "inaccessible unsupported depth surface",
+              !inert_mip_depth.image_id && !inert_mip_depth.depth_test_enable,
+              "an ALWAYS/no-write depth test bound an unrepresentable depth surface");
+      registers.SetDepthRenderTarget(phased_depth_target);
+      RenderDepthInfo inert_depth{};
+      RenderExecutorTestAccess::ResolveRenderDepthTarget(
+          executor, scheduler.Current(), inert_depth);
+      Require(name, "inaccessible representable depth surface",
+              inert_depth.image_id && inert_depth.depth_test_enable &&
+                  !inert_depth.depth_write_enable,
+              "an ALWAYS/no-write depth test stopped binding a representable surface");
+      registers.SetDepthControl(phased_depth_control);
       phased_depth_control.z_enable = true;
       registers.SetDepthControl(phased_depth_control);
       HW::RenderControl phased_render_control{};
