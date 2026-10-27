@@ -216,8 +216,8 @@ TextureCache::BindingType TextureCache::UploadBinding(const Image& image) {
 	return image.usage.storage ? BindingType::Storage : BindingType::Texture;
 }
 
-ImageId TextureCache::InsertImage(const ImageInfo& info) {
-	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info);
+ImageId TextureCache::InsertImage(const ImageInfo& info, uint32_t layer_capacity) {
+	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info, layer_capacity);
 	RegisterImage(id);
 	return id;
 }
@@ -941,6 +941,12 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 		               requested.extent.depth >= cached.info.extent.depth)) {
 			return {ExpandImage(requested, cached_id)};
 		}
+		if (IsLayerGrowth(cached.info, requested)) {
+			if (TryGrowImageLayers(requested, cached_id)) {
+				return {cached_id};
+			}
+			return {ExpandImage(requested, cached_id)};
+		}
 		// PS5 mip tails can expose more levels without increasing the guest allocation.
 		if (requested.pixel_format == cached.info.pixel_format &&
 		    requested.type == cached.info.type && requested.resources > cached.info.resources &&
@@ -998,9 +1004,66 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 	return {merged_id};
 }
 
+bool TextureCache::IsLayerGrowth(const ImageInfo& cached, const ImageInfo& requested) {
+	const uint32_t cached_layers    = cached.resources.layers;
+	const uint32_t requested_layers = requested.resources.layers;
+	if (cached.IsVolume() || requested.IsVolume() || cached.IsDepth() || requested.IsDepth() ||
+	    cached.HasStencil() || requested.HasStencil() || cached.HasMetadata() ||
+	    requested.HasMetadata() || cached.samples != 1 || requested.samples != 1 ||
+	    cached_layers == 0 || requested_layers <= cached_layers ||
+	    cached.data.address != requested.data.address || cached.pixel_format != requested.pixel_format ||
+	    cached.guest_format != requested.guest_format || cached.type != requested.type ||
+	    cached.extent != requested.extent || cached.pitch != requested.pitch ||
+	    cached.bytes_per_block != requested.bytes_per_block ||
+	    cached.tile_mode != requested.tile_mode || cached.bgra16 != requested.bgra16 ||
+	    cached.resources.levels != requested.resources.levels ||
+	    cached.resources.levels > cached.mip_layout.size() ||
+	    cached.data.size % cached_layers != 0 ||
+	    requested.data.size / requested_layers != cached.data.size / cached_layers ||
+	    requested.data.size % requested_layers != 0) {
+		return false;
+	}
+	for (uint32_t level = 0; level < cached.resources.levels; level++) {
+		const auto& old_mip = cached.mip_layout[level];
+		const auto& new_mip = requested.mip_layout[level];
+		if (old_mip.offset != new_mip.offset || old_mip.pitch != new_mip.pitch ||
+		    old_mip.height != new_mip.height ||
+		    old_mip.size / cached_layers * requested_layers != new_mip.size ||
+		    old_mip.size % cached_layers != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool TextureCache::TryGrowImageLayers(const ImageInfo& requested, ImageId id) {
+	auto& image = m_slot_images[id];
+	if (!IsLayerGrowth(image.info, requested) ||
+	    requested.resources.layers > image.LayerCapacity() || image.depth_id ||
+	    UploadBinding(image) == BindingType::VideoOut) {
+		return false;
+	}
+	RefreshCopySource(id);
+	const uint32_t first_new_layer = image.info.resources.layers;
+	UnregisterImage(id);
+	image.info = requested;
+	RegisterImage(id);
+	TrackImage(id);
+	if (image.binding.is_bound || image.binding.is_target) {
+		image.binding.needs_rebind = true;
+	}
+	UploadImageLayers(image, first_new_layer, requested.resources.layers - first_new_layer);
+	return true;
+}
+
 ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId source_id) {
 	RefreshCopySource(source_id);
-	const auto expanded_id = InsertImage(info);
+	const auto& previous = m_slot_images[source_id];
+	const uint32_t layer_capacity =
+	    IsLayerGrowth(previous.info, info)
+	        ? std::max(info.resources.layers, previous.LayerCapacity() * 2u)
+	        : 0u;
+	const auto expanded_id = InsertImage(info, layer_capacity);
 	auto&      source      = m_slot_images[source_id];
 	if (source.binding.is_bound || source.binding.is_target) {
 		source.binding.needs_rebind = true;
@@ -1031,6 +1094,34 @@ bool TextureCache::CanDownload(const Image& image) const {
 	return info.metadata.compression == VideoOutCompression::Uncompressed &&
 	       (!info.IsTiled() || !Prospero::IsFmaskTextureFormat(info.guest_format)) &&
 	       info.LinearSize() != 0;
+}
+
+void TextureCache::UploadImageLayers(Image& image, uint32_t first_layer, uint32_t layer_count) {
+	const auto& info = image.info;
+	EXIT_IF(layer_count == 0 || first_layer > info.resources.layers ||
+	        layer_count > info.resources.layers - first_layer ||
+	        info.data.size % info.resources.layers != 0);
+	const uint64_t slice_size = info.data.size / info.resources.layers;
+	ImageInfo      slices     = info;
+	slices.data               = {info.data.address + slice_size * first_layer,
+	                             slice_size * layer_count};
+	slices.resources.layers   = layer_count;
+	for (uint32_t level = 0; level < info.resources.levels; level++) {
+		slices.mip_layout[level].size =
+		    info.mip_layout[level].size / info.resources.layers * layer_count;
+	}
+	const auto [source, source_offset] =
+	    m_buffer_cache.ObtainBufferForImage(slices.data.address, slices.data.size);
+	if (source == nullptr) {
+		EXIT("TextureCache: failed to obtain layer upload source\n");
+	}
+	const auto linear = m_tiler.Detile(source->Handle(), source_offset, slices);
+	auto       copies = slices.BufferCopies(linear.offset);
+	for (auto& copy: copies) {
+		copy.imageSubresource.baseArrayLayer += first_layer;
+	}
+	image.Upload(copies, linear.buffer, linear.offset, linear.size);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureUploadBytes, linear.size);
 }
 
 void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_offset) {
@@ -1735,7 +1826,7 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 	EXIT_IF(range.baseMipLevel >= image.info.resources.levels);
 	const auto layers = image.info.IsVolume()
 	                        ? std::max(image.info.extent.depth >> range.baseMipLevel, 1u)
-	                        : image.backing.layers;
+	                        : image.info.resources.layers;
 	EXIT_IF(command.IsInvalid() || image.depth_id || !range.aspectMask || range.levelCount == 0 ||
 	        range.levelCount > image.info.resources.levels - range.baseMipLevel ||
 	        range.layerCount == 0 || range.baseArrayLayer >= layers ||
