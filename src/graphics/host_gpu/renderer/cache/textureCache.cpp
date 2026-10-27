@@ -905,11 +905,11 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 		     !std::equal(requested.mip_layout.begin(), requested.mip_layout.end(),
 		                 cached.info.mip_layout.begin(), SameMipPlacement)) ||
 		    shared_levels_differ) {
-			// The request becomes a separate image. An idle cached image is retired; GPU-written
-			// contents are published to the buffer cache first, so the new image uploads them and
-			// no stale copy is left for range lookups or texture GC to download later.
+			// The request becomes a separate image. When an idle cached image is retired, copy its
+			// native contents into the requested layout. Publishing the old guest layout first is
+			// insufficient: a shorter backwards mip chain puts its base level at another offset.
 			if (safe_to_delete) {
-				BcAlias::Resolve(*this, cached_id, merged_id);
+				return {ExpandImage(requested, cached_id)};
 			}
 			return {merged_id};
 		}
