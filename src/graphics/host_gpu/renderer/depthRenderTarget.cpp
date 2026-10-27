@@ -131,6 +131,30 @@ static vk::StencilOpState ConvertStencilState(
 	return vk::Format::eUndefined;
 }
 
+[[nodiscard]] static const char* UnrepresentableDepthState(const HW::DepthRenderTarget& z,
+                                                           uint64_t depth_address) {
+	const bool has_htile = z.z_info.htile_acceleration;
+	if (z.z_info.partially_resident) {
+		return "partially resident depth";
+	}
+	if (z.stencil_info.partially_resident) {
+		return "partially resident stencil";
+	}
+	if (z.z_info.max_mip_level != 0) {
+		return "depth mip chain";
+	}
+	if (z.depth_view.current_mip_level != 0) {
+		return "depth view mip level";
+	}
+	if (z.shading_rate_encoding > 1 || (z.shading_rate_encoding != 0 && !has_htile)) {
+		return "shading rate encoding";
+	}
+	if (depth_address == 0 || (depth_address & 0xffffu) != 0) {
+		return "depth address alignment";
+	}
+	return nullptr;
+}
+
 static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
                                                   const HW::DepthRenderTarget& z,
                                                   bool write_buffer = false) {
@@ -143,8 +167,6 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 		DepthFatal("invalid PS5 depth texture-compatibility encoding");
 	}
 	const bool has_htile = z.z_info.htile_acceleration;
-	const bool unsupported_shading_rate_encoding =
-	    z.shading_rate_encoding > 1 || (z.shading_rate_encoding != 0 && !has_htile);
 	const auto samples   = render_sample_count(z.z_info.num_samples);
 	if (samples == 0) {
 		DepthFatal("unsupported depth fragment count: %u", z.z_info.num_samples);
@@ -160,10 +182,16 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 			           z.depth_view.slice_max);
 	}
 	// EXPCLEAR permits an HTile acceleration state; the host attachment is already expanded.
-	if (z.z_info.max_mip_level != 0 ||
-	    z.depth_view.current_mip_level != 0 || unsupported_shading_rate_encoding ||
-	    depth_address == 0 || (depth_address & 0xffffu) != 0) {
-		DepthFatal("unsupported depth register state");
+	if (const char* unsupported = UnrepresentableDepthState(z, depth_address)) {
+		DepthFatal("unsupported depth register state: %s (max_mip=%u view_mip=%u "
+		           "z_partially_resident=%u stencil_partially_resident=%u "
+		           "shading_rate_encoding=%u htile=%u address=0x%016" PRIx64 ")",
+		           unsupported, static_cast<uint32_t>(z.z_info.max_mip_level),
+		           static_cast<uint32_t>(z.depth_view.current_mip_level),
+		           static_cast<uint32_t>(z.z_info.partially_resident),
+		           static_cast<uint32_t>(z.stencil_info.partially_resident),
+		           static_cast<uint32_t>(z.shading_rate_encoding), has_htile ? 1u : 0u,
+		           depth_address);
 	}
 	if (has_stencil) {
 		if (z.stencil_info.format != Prospero::StencilFormat::k8UInt || !htile_stencil_compat ||
@@ -298,8 +326,22 @@ void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 		}
 		return;
 	}
-	if (rc.copy_stencil_to_color ||
-	    dc.zfunc > static_cast<uint8_t>(vk::CompareOp::eAlways) ||
+	const bool depth_memory_access =
+	    (dc.z_enable && (dc.zfunc != static_cast<uint8_t>(vk::CompareOp::eAlways) ||
+	                     (dc.z_write_enable && !z.depth_view.depth_write_disable))) ||
+	    dc.depth_bounds_enable || rc.depth_clear_enable || rc.copy_depth_to_color;
+	if (!depth_memory_access && !stencil_active) {
+		if (const char* unsupported = UnrepresentableDepthState(z, z.z_read_base_addr)) {
+			static std::atomic_bool logged = false;
+			if (!logged.exchange(true, std::memory_order_relaxed)) {
+				LOGF("DepthTarget: skipping inaccessible unsupported depth surface (%s)\n",
+				     unsupported);
+			}
+			return;
+		}
+	}
+	if (rc.copy_stencil_to_color || rc.copy_centroid ||
+	    rc.copy_sample != 0 || dc.zfunc > static_cast<uint8_t>(vk::CompareOp::eAlways) ||
 	    (!z.depth_view.depth_write_disable && z.z_write_base_addr != z.z_read_base_addr) ||
 	    (has_stencil && !z.depth_view.stencil_write_disable &&
 	     z.stencil_write_base_addr != z.stencil_read_base_addr)) {
