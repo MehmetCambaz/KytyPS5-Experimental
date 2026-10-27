@@ -15638,6 +15638,9 @@ public:
       context.MapMemory(base, allocation_size);
       auto &cache = context.GetTextureCache();
       auto &executor = context.GetRenderExecutor();
+      Libs::Graphics::ImageId previous_id{};
+      uint32_t previous_capacity = 0;
+      uint32_t in_place_growths = 0;
       for (uint32_t face = 0; face < half_red.size(); ++face) {
         // PPSA25380 clears six single-face cube views at one guest address.
         ShaderTextureResource descriptor{{static_cast<uint32_t>(base >> 8u),
@@ -15680,11 +15683,17 @@ public:
                     image.info.pixel_format == vk::Format::eR16G16B16A16Sfloat &&
                     image.info.bytes_per_block == 8 &&
                     image.info.resources.layers == face + 1 &&
-                    image.backing.layers == face + 1 &&
+                    image.LayerCapacity() >= face + 1 &&
                     binding.desc.view_info.type == vk::ImageViewType::e2DArray &&
                     binding.desc.view_info.base_layer == face &&
                     binding.desc.view_info.layer_count == 1,
                 "cube face did not expand the array or select its own layer");
+        Require(name, "in-place layer growth",
+                face + 1 > previous_capacity || binding.image_id == previous_id,
+                "face " + std::to_string(face) + " reallocated an image with spare layers");
+        in_place_growths += face != 0 && binding.image_id == previous_id ? 1u : 0u;
+        previous_id = binding.image_id;
+        previous_capacity = image.LayerCapacity();
         image.Transit(vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite,
                       {}, scheduler.Current().Handle());
         storage.layout = image.backing.state.layout;
@@ -15704,6 +15713,8 @@ public:
           }
         }
       }
+      Require(name, "reserved layer capacity", in_place_growths != 0,
+              "slice-by-slice growth never reused reserved host layers");
       RenderExecutorTestAccess::ResetBindings(executor);
       context.UnmapMemory(base, allocation_size);
       scheduler.Finish();
