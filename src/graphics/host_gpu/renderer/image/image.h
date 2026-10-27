@@ -47,7 +47,8 @@ struct ImageBinding {
 
 class Image final {
 public:
-	Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageInfo& info);
+	Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageInfo& info,
+	      uint32_t layer_capacity = 0);
 	~Image();
 	KYTY_CLASS_NO_COPY(Image);
 
@@ -123,7 +124,17 @@ public:
 	}
 	[[nodiscard]] bool IsTracked() const noexcept { return track_addr != 0 && track_addr_end != 0; }
 	[[nodiscard]] uint64_t AccountedSize() const noexcept {
-		return backing.image == nullptr ? 0 : Common::AlignUp(info.data.size, 1024);
+		if (backing.image == nullptr) {
+			return 0;
+		}
+		const auto layers = info.resources.layers;
+		const auto size   = info.IsVolume() || layers == 0 || backing.layers <= layers
+		                        ? info.data.size
+		                        : info.data.size / layers * backing.layers;
+		return Common::AlignUp(size, 1024);
+	}
+	[[nodiscard]] uint32_t LayerCapacity() const noexcept {
+		return info.IsVolume() ? 1u : backing.layers;
 	}
 	[[nodiscard]] uint64_t HashGuestEdges() const;
 	[[nodiscard]] vk::ImageLayout ReadLayout() const noexcept {

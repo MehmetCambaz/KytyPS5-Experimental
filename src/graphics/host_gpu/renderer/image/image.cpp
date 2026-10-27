@@ -131,25 +131,26 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 		range->base_layer  = 0;
 		range->layer_count = 1;
 	}
+	const uint32_t host_layers = LayerCapacity();
 
 	const bool partial =
 	    range && (range->base_level != 0 || range->level_count != info.resources.levels ||
-	              range->base_layer != 0 || range->layer_count != info.resources.layers);
+	              range->base_layer != 0 || range->layer_count != host_layers);
 	const bool has_subresource_states = !subresource_states.empty();
 
 	Barriers barriers;
 	if (partial || has_subresource_states) {
 		if (!has_subresource_states) {
-			subresource_states.resize(info.resources.levels * info.resources.layers, state);
+			subresource_states.resize(info.resources.levels * host_layers, state);
 		}
 
 		const uint32_t base_level  = partial ? range->base_level : 0;
 		const uint32_t level_count = partial ? range->level_count : info.resources.levels;
 		const uint32_t base_layer  = partial ? range->base_layer : 0;
-		const uint32_t layer_count = partial ? range->layer_count : info.resources.layers;
+		const uint32_t layer_count = partial ? range->layer_count : host_layers;
 		for (uint32_t level = base_level; level < base_level + level_count; level++) {
 			for (uint32_t layer = base_layer; layer < base_layer + layer_count; layer++) {
-				const auto index = level * info.resources.layers + layer;
+				const auto index = level * host_layers + layer;
 				EXIT_IF(index >= subresource_states.size());
 				auto& subresource_state = subresource_states[index];
 
@@ -329,8 +330,8 @@ std::pair<uint32_t, uint32_t> Image::SanitizeCopyLayers(const Image& source,
                                                         const Image& destination, uint32_t depth) {
 	const auto source_type        = source.backing.image_type;
 	const auto destination_type   = destination.backing.image_type;
-	uint32_t   source_layers      = source.backing.layers;
-	uint32_t   destination_layers = destination.backing.layers;
+	uint32_t   source_layers      = source.info.resources.layers;
+	uint32_t   destination_layers = destination.info.resources.layers;
 	if (source_type == vk::ImageType::e3D) {
 		source_layers = 1;
 	}
@@ -514,10 +515,10 @@ void Image::CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tile
 		const auto height            = std::max(source.backing.extent.height >> level, 1u);
 		const auto source_depth      = source.backing.image_type == vk::ImageType::e3D
 		                                   ? std::max(source.backing.extent.depth >> level, 1u)
-		                                   : source.backing.layers;
+		                                   : source.info.resources.layers;
 		const auto destination_depth = backing.image_type == vk::ImageType::e3D
 		                                   ? std::max(backing.extent.depth >> level, 1u)
-		                                   : backing.layers;
+		                                   : info.resources.layers;
 		const auto slices            = std::min(source_depth, destination_depth);
 		const auto block_rows        = (height + source_block - 1) / source_block;
 		const auto row_size =
@@ -576,7 +577,7 @@ void Image::CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tile
 
 void Image::CopyMip(Image& source, uint32_t mip, uint32_t layer) {
 	EXIT_IF(source.backing.samples != backing.samples || mip >= backing.mip_levels ||
-	        layer >= backing.layers);
+	        layer >= (info.IsVolume() ? backing.layers : info.resources.layers));
 	m_scheduler.EndRendering();
 	const auto width  = std::max(backing.extent.width >> mip, 1u);
 	const auto height = std::max(backing.extent.height >> mip, 1u);
@@ -699,7 +700,8 @@ Prospero::BufferFormat RenderTargetTransferFormat(uint32_t bytes_per_element) {
 
 } // namespace ImageOps
 
-Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageInfo& image_info)
+Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageInfo& image_info,
+             uint32_t layer_capacity)
     : info(image_info),
       stencil_subresources {0, image_info.resources.levels, 0, image_info.resources.layers},
       m_graphics(graphics), m_scheduler(scheduler) {
@@ -733,6 +735,10 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 		     static_cast<int>(create.format), static_cast<int>(create.imageType),
 		     static_cast<vk::ImageUsageFlags::MaskType>(create.usage),
 		     static_cast<vk::ImageCreateFlags::MaskType>(create.flags), info.samples);
+	}
+	if (!info.IsVolume() && layer_capacity > create.arrayLayers) {
+		create.arrayLayers = std::max(create.arrayLayers,
+		                              std::min(layer_capacity, properties.maxArrayLayers));
 	}
 
 	if (!graphics.CreateImage(create, backing)) {
