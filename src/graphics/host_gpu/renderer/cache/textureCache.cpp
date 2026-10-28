@@ -897,8 +897,9 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 		// a level into or out of the mip tail. These are separate guest layouts.
 		// The mip count matters too: if any level both layouts have is placed differently, the
 		// cached image cannot serve the request.
+		const bool shader_binding = binding == BindingType::Texture || binding == BindingType::Storage;
 		const bool shared_levels_differ =
-		    requested.resources.levels != cached.info.resources.levels &&
+		    shader_binding && requested.resources.levels != cached.info.resources.levels &&
 		    !SharedLevelsMatch(requested, cached.info);
 		if (requested.tile_mode != cached.info.tile_mode ||
 		    (requested.resources == cached.info.resources &&
@@ -1470,8 +1471,10 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			}
 			// Equal size and a longer chain are not enough: the levels the request uses must sit
 			// where the cached image keeps them.
+			const bool shader_binding =
+			    desc.type == BindingType::Texture || desc.type == BindingType::Storage;
 			if (SameBacking(image.info, desc.info, exact_format) &&
-			    (image.info.resources.levels == desc.info.resources.levels ||
+			    (!shader_binding || image.info.resources.levels == desc.info.resources.levels ||
 			     SharedLevelsMatch(image.info, desc.info))) {
 				result = id;
 			} else if (image.SafeToDownload() &&
