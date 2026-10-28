@@ -30,7 +30,6 @@
 #include <mutex>
 #include <semaphore>
 #include <thread>
-#include <utility>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -89,12 +88,6 @@ void GuestGpu::SendCommand(Common::UniqueFunction<void>&& command) {
 	EXIT_IF(!m_accepting);
 	m_commands.push_back(std::move(command));
 	m_pending_commands.fetch_add(1, std::memory_order_release);
-	m_work_available.Signal();
-}
-
-void GuestGpu::Wake() {
-	Common::LockGuard lock(m_queue_mutex);
-	m_wake_pending = true;
 	m_work_available.Signal();
 }
 
@@ -459,10 +452,7 @@ void GuestGpu::ThreadRun(void* data) {
 				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
-					// A wake that came before this wait must not be lost.
-					if (!std::exchange(gpu->m_wake_pending, false)) {
-						gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
-					}
+					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
 							queue.front().blocked = false;
@@ -886,9 +876,8 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	// NUM_INSTANCES keeps the last draw's instance count.
 	m_num_instances_addr = args_addr + static_cast<uint64_t>(draw_count - 1) * stride_in_bytes +
 	                       offsetof(vk::DrawIndirectCommand, instanceCount);
-	// The GPU reads the records if the shaders allow; the VS prolog loads the patched SGPRs from
-	// Vulkan's bases. With no SGPR patched, Vulkan applies the offsets, which matches while they
-	// are zero.
+	// The GPU reads the records if the shaders allow; the VS prolog removes Vulkan's bases
+	// from the index VGPRs and copies them only to the user SGPRs the packet patches.
 	DrawIndirectArgs records {args_addr, draw_count, stride_in_bytes};
 	if (IndirectDrawOffsets(registers, records.offsets) && (!indexed || m_index_buffer_size != 0) &&
 	    (indexed ? executor.DrawIndex(m_submit_id, CurrentBuffer(),
@@ -980,11 +969,10 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
-	// Stall only this command processor, not the host command lane or other queues.
-	if (!m_renderer.GetVideoOut().IsSafeForRendering(static_cast<int>(video_out_handle),
-	                                                 static_cast<int>(display_buffer_index))) {
-		SuspendPm4();
-	}
+	BufferFlush();
+
+	m_renderer.GetVideoOut().WaitFlipDone(static_cast<int>(video_out_handle),
+	                                      static_cast<int>(display_buffer_index));
 }
 
 void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector, void* address,
