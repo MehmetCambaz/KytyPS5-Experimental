@@ -134,12 +134,6 @@ static vk::StencilOpState ConvertStencilState(
 [[nodiscard]] static const char* UnrepresentableDepthState(const HW::DepthRenderTarget& z,
                                                            uint64_t depth_address) {
 	const bool has_htile = z.z_info.htile_acceleration;
-	if (z.z_info.partially_resident) {
-		return "partially resident depth";
-	}
-	if (z.stencil_info.partially_resident) {
-		return "partially resident stencil";
-	}
 	if (z.z_info.max_mip_level != 0) {
 		return "depth mip chain";
 	}
