@@ -678,7 +678,6 @@ int KYTY_SYSV_ABI fflush(GuestStdio::File* stream) {
 		return GuestStdio::Flush(stream, stderr);
 	}
 
-	EXIT_NOT_IMPLEMENTED(true);
 	return EOF;
 }
 
