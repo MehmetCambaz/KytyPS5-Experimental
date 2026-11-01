@@ -917,6 +917,101 @@ void TestReverbDryLevel() {
 	      "reverb did not pass its dry signal");
 }
 
+void TestGeomStereoPlacement() {
+  Ngs2GeomListenerParam listener;
+  Ngs2GeomListenerWork work;
+  Ngs2GeomResetListenerParam(&listener);
+  Check(Ngs2GeomCalcListener(&listener, &work, 0) == OK,
+        "geom listener failed");
+
+  auto place = [&](float x, float z, float &l, float &r) {
+    Ngs2GeomSourceParam source;
+    Ngs2GeomResetSourceParam(&source);
+    source.matrix_format = 2;
+    source.position = {x, 0.0f, z};
+    Ngs2GeomAttribute attrib;
+    Check(Ngs2GeomApply(&work, &source, &attrib, 0) == OK, "geom apply failed");
+    l = attrib.level[0];
+    r = attrib.level[1];
+  };
+  float l, r;
+  place(0.0f, 1.0f, l, r);
+  Check(std::abs(l - r) < 0.001f && l > 0.5f, "source ahead should be centred");
+  place(1.0f, 0.0f, l, r);
+  Check(r > 0.9f * l + 0.1f && l < 0.1f,
+        "source on the right should pan right");
+  place(-1.0f, 0.0f, l, r);
+  Check(l > 0.9f * r + 0.1f && r < 0.1f, "source on the left should pan left");
+  float near_l, near_r;
+  place(2.0f, 0.0f, near_l, near_r);
+  place(20.0f, 0.0f, l, r);
+  Check(r < near_r, "a distant source should be quieter");
+}
+
+void TestGeomDoppler() {
+  Ngs2GeomListenerParam listener;
+  Ngs2GeomListenerWork work;
+  Ngs2GeomResetListenerParam(&listener);
+  Check(Ngs2GeomCalcListener(&listener, &work, 0) == OK,
+        "geom listener failed");
+
+  auto pitch = [&](float source_vz, float listener_vz) {
+    Ngs2GeomListenerWork moving = work;
+    moving.velocity = {0.0f, 0.0f, listener_vz};
+    Ngs2GeomSourceParam source;
+    Ngs2GeomResetSourceParam(&source);
+    source.position = {0.0f, 0.0f, 10.0f};
+    source.velocity = {0.0f, 0.0f, source_vz};
+    source.doppler_factor = 1.0f;
+    Ngs2GeomAttribute attrib;
+    Check(Ngs2GeomApply(&moving, &source, &attrib, 0) == OK,
+          "geom apply failed");
+    return attrib.pitch_ratio;
+  };
+  Check(pitch(-5.0f, 0.0f) > 1.0f, "approaching source should raise pitch");
+  Check(pitch(5.0f, 0.0f) < 1.0f, "receding source should lower pitch");
+  Check(pitch(0.0f, 5.0f) > 1.0f, "approaching listener should raise pitch");
+  Check(pitch(0.0f, -5.0f) < 1.0f, "receding listener should lower pitch");
+}
+
+void TestReverbTail() {
+  Ngs2ReverbState reverb;
+  reverb.params = {0.6f, 0.4f, -1000, -602, -302, 2.91f, 1.3f, 0.015f, 0.022f};
+  reverb.Prepare(2, 48000);
+  reverb.Apply();
+  const uint32_t grain = 256;
+  std::vector<float> block(2 * grain, 0.0f);
+  Check(!reverb.Process(block, grain, false), "idle reverb produced output");
+
+  block[0] = 1.0f;
+  block[grain] = 1.0f;
+  Check(reverb.Process(block, grain, true), "reverb dropped its input");
+  Check(std::abs(block[0] - 0.4f) < 1e-6f, "reverb changed the dry level");
+
+  float early = 0.0f, late = 0.0f;
+  for (int g = 1; g < 1400; ++g) {
+    std::ranges::fill(block, 0.0f);
+    const bool out = reverb.Process(block, grain, false);
+    float peak = 0.0f;
+    for (float v : block) {
+      Check(std::isfinite(v) && std::abs(v) < 1.0f, "reverb tail is unstable");
+      peak = std::max(peak, std::abs(v));
+    }
+    if (g == 20) {
+      early = peak;
+    }
+    if (g == 400) {
+      late = peak;
+    }
+    if (!out) {
+      Check(g > 600, "reverb tail ended too early");
+      Check(late > 0.0f && late < early, "reverb tail did not decay");
+      return;
+    }
+  }
+  Check(false, "reverb tail never ended");
+}
+
 void TestCustomMasteringChannelMixer() {
 	Ngs2Internal system;
 	system.option = Ngs2DefaultSystemOption();
@@ -2002,6 +2097,9 @@ int main() {
 	TestMasteringGain();
 	TestMasteringDownmix();
 	TestReverbDryLevel();
+	TestReverbTail();
+	TestGeomStereoPlacement();
+	TestGeomDoppler();
 	TestCustomMasteringChannelMixer();
 	TestCustomVoiceStateCapacity();
 	TestSubmixerSetupAndRouting();

@@ -2353,11 +2353,97 @@ int KYTY_SYSV_ABI Ngs2GeomApply(const Ngs2GeomListenerWork* listener,
 	out_attrib->a3d_attrib.position = source->position;
 	out_attrib->a3d_attrib.volume   = std::max(source->min_level, source->max_level);
 
-	const auto channels =
-	    std::min<uint32_t>((source->matrix_format == 0 ? 2u : source->matrix_format), 8);
-	const auto level = (source->max_level > 0.0f ? source->max_level : 1.0f);
-	for (uint32_t ch = 0; ch < channels; ch++) {
-		out_attrib->level[ch * 8 + ch] = level;
+	const Ngs2GeomVector listener_pos {listener->matrix[3][0], listener->matrix[3][1],
+	                                   listener->matrix[3][2]};
+	const Ngs2GeomVector right {listener->matrix[0][0], listener->matrix[0][1],
+	                            listener->matrix[0][2]};
+	const Ngs2GeomVector front {listener->matrix[2][0], listener->matrix[2][1],
+	                            listener->matrix[2][2]};
+
+	const auto  offset   = GeomSub(source->position, listener_pos);
+	const float distance = GeomLength(offset);
+
+	// Distance attenuation between the reference and maximum distances.
+	const float reference = std::max(source->rolloff.reference_distance, 1e-6f);
+	const float max_dist  = std::max(source->rolloff.max_distance, reference);
+	const float clamped   = std::clamp(distance, reference, max_dist);
+	const float factor    = source->rolloff.rolloff_factor;
+	float       gain      = 1.0f;
+	switch (source->rolloff.model) {
+		case 1:
+			gain = (max_dist > reference)
+			           ? 1.0f - factor * (clamped - reference) / (max_dist - reference)
+			           : 1.0f;
+			break;
+		case 2: gain = std::pow(clamped / reference, -factor); break;
+		default: gain = reference / (reference + factor * (clamped - reference)); break;
+	}
+	gain = std::clamp(gain, 0.0f, 1.0f);
+
+	// Cone: the level moves from the inner to the outer level with the angle off the axis.
+	if (distance > 0.0f && source->cone.outer_angle < 360.0f) {
+		const auto  axis      = GeomNormalize(source->direction, {0.0f, 0.0f, 1.0f});
+		const auto  to_listen = GeomScale(offset, -1.0f / distance);
+		const float angle =
+		    std::acos(std::clamp(GeomDot(axis, to_listen), -1.0f, 1.0f)) * (180.0f / PI) * 2.0f;
+		float cone = 1.0f;
+		if (angle <= source->cone.inner_angle) {
+			cone = source->cone.inner_level;
+		} else if (angle >= source->cone.outer_angle) {
+			cone = source->cone.outer_level;
+		} else {
+			const float t = (angle - source->cone.inner_angle) /
+			                (source->cone.outer_angle - source->cone.inner_angle);
+			cone          = source->cone.inner_level +
+			                t * (source->cone.outer_level - source->cone.inner_level);
+		}
+		gain *= cone;
+	}
+
+	const float level = source->min_level + (source->max_level - source->min_level) * gain;
+	out_attrib->a3d_attrib.volume = level;
+
+	// Doppler shift from the speed of both ends along the line between them.
+	if (distance > 0.0f && source->doppler_factor > 0.0f) {
+		const float sound = std::max(listener->sound_speed, 1.0f);
+		// Source-to-listener direction, as in the DS3D/OpenAL Doppler model.
+		const auto  axis  = GeomScale(offset, -1.0f / distance);
+		const float vl =
+		    std::min(GeomDot(listener->velocity, axis), sound / source->doppler_factor - 1.0f);
+		const float vs =
+		    std::min(GeomDot(source->velocity, axis), sound / source->doppler_factor - 1.0f);
+		out_attrib->pitch_ratio =
+		    (sound - source->doppler_factor * vl) / (sound - source->doppler_factor * vs);
+	}
+
+	// Azimuth of the source from the listener's front, positive to the right.
+	float angle  = 0.0f;
+	float spread = 0.0f;
+	if (distance > source->radius && distance > 1e-6f) {
+		angle = std::atan2(GeomDot(offset, right), GeomDot(offset, front)) * (180.0f / PI);
+	} else {
+		spread = 1.0f; // At the listener or inside the source's radius: no direction.
+	}
+
+	const uint32_t inputs =
+	    (source->matrix_format == 0 ? 2u : std::min<uint32_t>(source->matrix_format, 8));
+	if (source->num_speakers == 2 || source->num_speakers == 0) {
+		float        left = 0.0f, right_gain = 0.0f;
+		Ngs2PanParam pan {angle, 1.0f, source->fbw_level, source->lfe_level};
+		PanStereoGains(pan, 360.0f, &left, &right_gain);
+		if (spread > 0.0f) {
+			left = right_gain = source->fbw_level * std::numbers::sqrt2_v<float> / 2;
+		}
+		// Every input is placed at the source position. Games commonly declare two channels and
+		// use only the first row as a mono pan, so an identity matrix would force that voice left.
+		for (uint32_t ch = 0; ch < inputs; ch++) {
+			out_attrib->level[ch * 8 + 0] = left * level;
+			out_attrib->level[ch * 8 + 1] = right_gain * level;
+		}
+	} else {
+		for (uint32_t ch = 0; ch < inputs; ch++) {
+			out_attrib->level[ch * 8 + ch] = level;
+		}
 	}
 
 	return OK;
