@@ -199,6 +199,7 @@ private:
 	RangeSet m_release_protected;
 	// Refaults logged so far, so only the first REFAULT_CONSOLE_LOG_LIMIT reach the console.
 	uint64_t m_refaults_logged = 0;
+	uint64_t m_bda_tick           = 0;
 };
 
 } // namespace Libs::Graphics
