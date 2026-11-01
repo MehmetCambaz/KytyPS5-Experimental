@@ -56,7 +56,7 @@ struct LoopProofTestAccess {
     auto& condition_reference = header->AppendNewInst(ValueOpcode::Reference, {Value(&condition)});
     header->condition = guarded ? Value(&compare) : Value(true);
     split->condition = Value(&condition);
-    ValidateProgram(program, true);
+    ValidateProgram(program);
     Decoder::Program decoded;
     CFG::Graph cfg;
     Tracker tracker(program, decoded, cfg, {});
@@ -87,7 +87,7 @@ struct LoopProofTestAccess {
     Check(bound_reference.Arg(0) == Value(&compare) && condition_reference.Arg(0) == Value(&condition),
           "DCE fixture rewrote a retaining Reference");
     Check(edges() == old_edges, "DCE changed CFG edges");
-    ValidateProgram(program, true);
+    ValidateProgram(program);
     Check(g_ir_mutation_epoch != old_epoch, "DCE branch fold did not advance IR mutation epoch");
     Check(tracker.m_increment_guards.at(key).epoch == old_epoch, "DCE unexpectedly refreshed cache");
     const bool fresh = tracker.ComputeIncrementGuard(phi, compare, body);
@@ -131,7 +131,7 @@ struct LoopProofTestAccess {
     auto& compare = header->AppendNewInst(ValueOpcode::ULessThan32, {Value(&phi), Value(4u)});
     auto& guard = header->AppendNewInst(ValueOpcode::Identity, {Value(&compare)});
     header->condition = Value(&guard);
-    ValidateProgram(program, true);
+    ValidateProgram(program);
     Decoder::Program decoded;
     CFG::Graph cfg;
     Tracker tracker(program, decoded, cfg, {});
@@ -262,7 +262,7 @@ struct LoopProofTestAccess {
       unknowns += !positive + !inverse;
     }
     Check(exclusions != 0 && unknowns != 0, "finite oracle did not exercise both proof outcomes");
-    ValidateProgram(program, true);
+    ValidateProgram(program);
   }
 };
 } // namespace

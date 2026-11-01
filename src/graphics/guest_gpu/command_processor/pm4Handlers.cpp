@@ -1285,16 +1285,19 @@ KYTY_CP_OP_PARSER(CpOpGetLodStats) {
 	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0038e00);
 
 	const auto buffer_size = buffer[0];
-	auto*      dst         = reinterpret_cast<void*>((buffer[1] & 0xffffffc0u) |
+	auto* dst = reinterpret_cast<volatile uint32_t*>((buffer[1] & 0xffffffc0u) |
 	                                                 (static_cast<uint64_t>(buffer[2]) << 32u));
 
-	if (dst != nullptr && buffer_size != 0) {
-		memset(dst, 0, buffer_size);
-		// Hack?
-		if (buffer_size >= sizeof(uint32_t)) {
-			auto* label = static_cast<uint32_t*>(dst);
-			*label      = 1;
+	// Mip statistics are not collected: each of up to 256 2-dword slots after the 16-dword header
+	// reports its id (dword 0 bits 24-31) and finest sampled mip 15 (dword 1 bits 24-27), i.e. no
+	// samples. A non-zero dword 0 then marks the report complete.
+	if (dst != nullptr && buffer_size >= 64) {
+		const auto slots = std::min((buffer_size - 64) / 8, 256u);
+		for (uint32_t slot = 0; slot < slots; slot++) {
+			dst[16 + slot * 2]     = slot << 24u;
+			dst[16 + slot * 2 + 1] = 15u << 24u;
 		}
+		dst[0] = 1;
 	}
 
 	return 4;
@@ -1707,6 +1710,17 @@ KYTY_CP_OP_PARSER(CpOpFlip) {
 	cp.Flip(static_cast<int>(buffer[0]), static_cast<int>(buffer[1]), static_cast<int>(buffer[2]),
 	        static_cast<int64_t>(buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u)));
 	return 5;
+}
+
+KYTY_CP_OP_PARSER(CpOpPssr) {
+	KYTY_PROFILER_FUNCTION();
+
+	const auto packet_dw = KYTY_PM4_LEN(cmd_id) - 1;
+	EXIT_NOT_IMPLEMENTED(packet_dw < Pssr::RequestDwords || packet_dw > dw);
+	Pssr::Request request {};
+	std::memcpy(&request, buffer, sizeof(request));
+	cp.ProcessPssr(request);
+	return packet_dw;
 }
 
 KYTY_CP_OP_PARSER(CpOpIndexType) {

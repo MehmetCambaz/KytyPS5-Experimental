@@ -208,13 +208,24 @@ void ReflectTessellationLayout(const Decoder::Program& program, bool local,
 					if (is_constant(rhs) && is_constant(third))
 						value = extract(lhs, rhs.constant & 31u, third.constant & 31u);
 					break;
-				case Opcode::V_AND_B32:
-					if (is_constant(lhs)) {
-						value = mask(rhs, lhs.constant);
-					} else if (is_constant(rhs)) {
-						value = mask(lhs, rhs.constant);
+				case Opcode::V_AND_B32: {
+					const auto and_mask = lhs.kind == Kind::PackedControlPoint ? rhs
+					                    : rhs.kind == Kind::PackedControlPoint ? lhs
+					                                                             : Address {};
+					if (and_mask == constant(0xffu)) {
+						value = constant(0u);
+					} else if (and_mask == constant(0x1f00u)) {
+						value = {Kind::Affine, 256u, 0u};
+					} else if (lhs.kind != Kind::PackedControlPoint &&
+					           rhs.kind != Kind::PackedControlPoint) {
+						if (is_constant(lhs)) {
+							value = mask(rhs, lhs.constant);
+						} else if (is_constant(rhs)) {
+							value = mask(lhs, rhs.constant);
+						}
 					}
 					break;
+				}
 				case Opcode::V_LSHRREV_B32:
 					if (is_constant(lhs) && lhs.constant < 32u)
 						value = extract(rhs, lhs.constant, 32u - lhs.constant);
