@@ -95,6 +95,29 @@ struct Fixture {
 	}
 };
 
+void TestStereoPan() {
+  Ngs2PanWork work;
+  Check(Ngs2PanInit(&work, nullptr, 360.0f, 2) == OK, "pan init failed");
+  auto pan = [&](float angle, float &l, float &r) {
+    Ngs2PanParam param{angle, 1.0f, 1.0f, 1.0f};
+    float m[2] = {};
+    Check(Ngs2PanGetVolumeMatrix(&work, &param, 1, 2, m) == OK,
+          "pan matrix failed");
+    l = m[0];
+    r = m[1];
+  };
+  float l, r;
+  pan(270.0f, l, r);
+  Check(l > 0.99f && r < 0.01f, "270 degrees should be hard left");
+  pan(90.0f, l, r);
+  Check(r > 0.99f && l < 0.01f, "90 degrees should be hard right");
+  pan(0.0f, l, r);
+  Check(std::abs(l - r) < 0.001f && std::abs(l - 0.7071f) < 0.01f,
+        "0 degrees should be centred");
+  pan(315.0f, l, r);
+  Check(l > r && r > 0.01f, "315 degrees should lean left");
+}
+
 void TestWaveformQueueCapacity() {
 	constexpr int32_t full = static_cast<int32_t>(0x804a8054u);
 	constexpr int32_t invalid_count = static_cast<int32_t>(0x804a8053u);
@@ -908,12 +931,12 @@ void TestReverbDryLevel() {
 		Ngs2VoiceParamHeader header {24, 24, 0x20010000};
 		uint32_t             channels[4] = {1, 1, 0, 0};
 		Ngs2VoiceParamHeader levels_header {96, 0, 0x20010001};
-		float                levels[22] = {0.6f, 0.4f};
-	} setup;
-	Ngs2VoiceControl(reinterpret_cast<uintptr_t>(&reverb), &setup.header);
-	reverb.SetEvent(1);
-	Ngs2RenderVoice(reverb, {&f.voice, &reverb}, 1);
-	Check(reverb.has_samples && reverb.samples[0] == 0.25f * 0.4f,
+                float levels[22] = {0.0f, 0.4f};
+        } setup;
+        Ngs2VoiceControl(reinterpret_cast<uintptr_t>(&reverb), &setup.header);
+        reverb.SetEvent(1);
+        Ngs2RenderVoice(reverb, {&f.voice, &reverb}, 1);
+        Check(reverb.has_samples && reverb.samples[0] == 0.25f * 0.4f,
 	      "reverb did not pass its dry signal");
 }
 
@@ -2088,11 +2111,12 @@ void TestFiniteFilterTail() {
 
 int main() {
 	TestProgressDrivenWaveformRing();
-	TestWaveformQueueCapacity();
-	TestWaveformRingReuse();
-	TestAtrac9Vibration();
-	TestAtrac9Discrete();
-	TestPcm16RenderOutput();
+        TestStereoPan();
+        TestWaveformQueueCapacity();
+        TestWaveformRingReuse();
+        TestAtrac9Vibration();
+        TestAtrac9Discrete();
+        TestPcm16RenderOutput();
 	TestPatchToRackHandle();
 	TestMasteringGain();
 	TestMasteringDownmix();
