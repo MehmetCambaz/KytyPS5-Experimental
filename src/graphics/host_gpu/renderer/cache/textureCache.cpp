@@ -1476,7 +1476,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		        m_image_page_table.Find(desc.info.data.address >> ImagePageTable::kPageBits)) {
 			owners->ForEach([&](ImageId id) {
 				const auto* image = m_slot_images.try_get(id);
-				if (!result && image != nullptr && SameBacking(image->info, desc.info, exact_format) &&
+				if (image != nullptr && SameBacking(image->info, desc.info, exact_format) &&
 				    (!shader_binding || image->info.resources.levels == desc.info.resources.levels ||
 				     SharedLevelsMatch(image->info, desc.info))) {
 					result = id;
