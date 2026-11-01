@@ -36,6 +36,7 @@ namespace {
 constexpr uint64_t NumFramesBeforeRemoval = 32;
 // Largest GPU-written tiled image (in texels) that is written back to guest memory on submit.
 constexpr uint64_t SmallTiledReadbackTexels = 64 * 64;
+constexpr uint64_t SmallStorageReadbackBytes = 512 * 1024;
 
 [[nodiscard]] bool SameMipPlacement(const ImageMipInfo& left, const ImageMipInfo& right) {
 	return left.offset == right.offset && left.size == right.size && left.pitch == right.pitch &&
@@ -282,6 +283,7 @@ void TextureCache::DeleteImage(ImageId id) {
 		EXIT("TextureCache: deleting a GPU-modified image without resolving its contents\n");
 	}
 	m_download_images.erase(id);
+	m_storage_downloads.erase(id);
 	if (image.info.metadata.kind == ImageMetadataKind::Htile) {
 		m_surface_metas.erase(image.info.metadata.range.address);
 	}
@@ -433,7 +435,9 @@ void TextureCache::TrackImageDownload(ImageId id, Image& image) {
 		if (!image.IsGpuModified()) {
 			EXIT("TextureCache: cannot enroll a non-GPU-owned image for download\n");
 		}
-		m_download_images.insert(id);
+		if (!m_storage_downloads.contains(id)) {
+			m_download_images.insert(id);
+		}
 	}
 }
 
@@ -825,13 +829,9 @@ bool Matches(const ImageInfo& requested, const ImageInfo& cached) {
 }
 
 bool Publish(TextureCache& cache, Image& image) {
-	if (!cache.CanDownload(image)) {
+	if (!cache.CopyImageToBufferCache(image)) {
 		return false;
 	}
-	// ObtainBuffer preserves padding and records ownership before the GPU-only transfer.
-	auto [buffer, offset] =
-	    cache.m_buffer_cache.ObtainBuffer(image.info.data.address, image.info.data.size, true);
-	cache.DownloadImage(image, *buffer, offset, image.info.data.size, image.info.resources.levels);
 	image.ClearGpuModified();
 	image.MarkBufferModified();
 	return true;
@@ -1678,7 +1678,12 @@ vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 		case BindingType::Texture: break;
 		case BindingType::Storage:
 			CommitGpuWrite(image);
-			TrackImageDownload(id, image);
+			if (!image.info.IsTiled() && image.info.data.size <= SmallStorageReadbackBytes) {
+				m_download_images.erase(id);
+				m_storage_downloads.insert(id);
+			} else {
+				TrackImageDownload(id, image);
+			}
 			break;
 		default: EXIT("TextureCache: invalid texture binding\n");
 	}
@@ -2122,14 +2127,12 @@ void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
 		return;
 	}
 	std::scoped_lock lock {m_lock};
-	for (const auto id: FindImagesInRegion(address, size, true)) {
+	for (const auto id: FindImagesInRegion(address, size, false)) {
 		auto& image = m_slot_images[id];
-		if (image.info.data.address != address) {
+		if (image.info.data.address != address && !image.HasBufferMirror()) {
 			continue;
 		}
-		if (image.IsGpuModified()) {
-			image.ClearGpuModified();
-		}
+		image.ClearGpuModified();
 		image.MarkBufferModified();
 	}
 }
@@ -2297,10 +2300,43 @@ void TextureCache::RunGarbageCollector() {
 	}
 }
 
-void TextureCache::ProcessDownloadImages() {
-	if (!m_readback_linear_images && !m_readback_tiled_images) {
-		return;
+void TextureCache::PublishStorageImages() {
+	std::vector<GuestRange> eager_readbacks;
+	{
+		std::scoped_lock lock {m_lock};
+		for (const auto id: m_storage_downloads) {
+			auto& image = m_slot_images[id];
+			if (image.IsMaybeCpuDirty()) {
+				TrackImage(id);
+				(void)image.ResolveMaybeCpuHash(image.HashGuestEdges());
+			}
+			if (!image.SafeToDownload() || !CopyImageToBufferCache(image)) {
+				continue;
+			}
+			if (m_readback_linear_images) {
+				eager_readbacks.push_back(image.info.data);
+			}
+		}
+		m_storage_downloads.clear();
 	}
+	for (const auto range: eager_readbacks) {
+		m_buffer_cache.ReadMemory(range.address, range.size);
+	}
+}
+
+bool TextureCache::CopyImageToBufferCache(Image& image) {
+	if (!CanDownload(image)) {
+		return false;
+	}
+	const auto range = image.info.data;
+	auto [buffer, offset] = m_buffer_cache.ObtainBuffer(range.address, range.size, true);
+	DownloadImage(image, *buffer, offset, range.size, image.info.resources.levels);
+	image.MarkBufferMirrored();
+	return true;
+}
+
+void TextureCache::ProcessDownloadImages() {
+	PublishStorageImages();
 	std::scoped_lock lock {m_lock};
 	for (const auto id: m_download_images) {
 		if (m_slot_images[id].IsGpuModified()) {
