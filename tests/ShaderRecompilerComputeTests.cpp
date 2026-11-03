@@ -390,6 +390,14 @@ struct TextureCacheTestAccess {
     cache.TrackImageDownload(id, cache.m_slot_images[id]);
   }
 
+  // Exercise the ordinary retry queue. Small storage images use the separate eager-publication
+  // queue in this branch, while ProcessDownloadImages() owns only this queue.
+  static void TrackRetryDownload(TextureCache &cache, ImageId id) {
+    std::lock_guard lock(cache.m_lock);
+    cache.m_storage_downloads.erase(id);
+    cache.TrackImageDownload(id, cache.m_slot_images[id]);
+  }
+
   static void AssociateStencil(TextureCache &cache, ImageId depth,
                                GuestRange stencil) {
     std::lock_guard lock(cache.m_lock);
@@ -12283,7 +12291,7 @@ public:
       Require(name, "image clear",
               texture_cache.ClearImageFromBuffer(command, base, sizeof(uint32_t), gpu_value),
               "failed to create GPU-current image contents");
-      TextureCacheTestAccess::TrackDownload(texture_cache, image);
+      TextureCacheTestAccess::TrackRetryDownload(texture_cache, image);
       Libs::LibKernel::Memory::WriteBacking(base, &stale_value, sizeof(stale_value));
 
       // A CPU write since the GPU one makes the image unsafe to download until it is refreshed.
@@ -12373,7 +12381,7 @@ public:
       Require(name, "image clear",
               texture_cache.ClearImageFromBuffer(command, base, sizeof(uint32_t), gpu_value),
               "failed to create GPU-current image contents");
-      TextureCacheTestAccess::TrackDownload(texture_cache, image);
+      TextureCacheTestAccess::TrackRetryDownload(texture_cache, image);
       Libs::LibKernel::Memory::WriteBacking(base, &cpu_value, sizeof(cpu_value));
 
       // A CPU write since the GPU one makes the image unsafe to download.
@@ -12491,7 +12499,7 @@ public:
               texture_cache.ClearImageFromBuffer(scheduler.Current(), base, sizeof(uint32_t),
                                                  gpu_value),
               "failed to create GPU-current image contents");
-      TextureCacheTestAccess::TrackDownload(texture_cache, image);
+      TextureCacheTestAccess::TrackRetryDownload(texture_cache, image);
       Libs::LibKernel::Memory::WriteBacking(base, &stale_value, sizeof(stale_value));
       // Hold the priority thread, so the readback's guest write cannot land before the checks
       // below. The release only submits, so nothing here waits for the priority thread.
@@ -12531,7 +12539,7 @@ public:
       desc.view_info.usage = vk::ImageUsageFlagBits::eStorage;
       const auto image = texture_cache.FindImage(desc);
       auto &owner = TextureCacheTestAccess::MutableImage(texture_cache, image);
-      TextureCacheTestAccess::TrackDownload(texture_cache, image);
+      TextureCacheTestAccess::TrackRetryDownload(texture_cache, image);
       owner.MarkCpuDirty();
       // The real collector pass, so a change to how it calls ProcessDownloadImages is caught. Its
       // trigger is 0 in a fresh context, so raise it, or the pass would free the unused image.
