@@ -2842,6 +2842,7 @@ int main(int argc, char** argv) {
   Check(graphics->window != nullptr, "create hidden Vulkan test window");
   graphics->CreateVulkan();
 
+  TestUnrealScreenPercentage();
   TempDirectory temporary;
   CheckOpenFileCoherence(temporary.Path());
   FileSystem::Initialize();
