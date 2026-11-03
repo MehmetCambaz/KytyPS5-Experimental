@@ -137,9 +137,6 @@ static vk::StencilOpState ConvertStencilState(
 	if (z.z_info.max_mip_level != 0) {
 		return "depth mip chain";
 	}
-	if (z.depth_view.current_mip_level != 0) {
-		return "depth view mip level";
-	}
 	if (z.shading_rate_encoding > 1 || (z.shading_rate_encoding != 0 && !has_htile)) {
 		return "shading rate encoding";
 	}
@@ -165,8 +162,6 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 	if (samples == 0) {
 		DepthFatal("unsupported depth fragment count: %u", z.z_info.num_samples);
 	}
-	const bool htile_stencil_compat = depth_htile_stencil_acceleration_compatible(
-	    has_stencil, has_htile, z.stencil_info.htile_stencil_disabled);
 	const auto view = ResolveTargetViewInfo(z.depth_view.slice_start, z.depth_view.slice_max);
 	switch (view.type) {
 		case TargetViewType::Image2D:
@@ -188,8 +183,8 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 		           depth_address);
 	}
 	if (has_stencil) {
-		if (z.stencil_info.format != Prospero::StencilFormat::k8UInt || !htile_stencil_compat ||
-		    stencil_address == 0 || (stencil_address & 0xffffu) != 0) {
+		if (z.stencil_info.format != Prospero::StencilFormat::k8UInt || stencil_address == 0 ||
+		    (stencil_address & 0xffffu) != 0) {
 			DepthFatal("unsupported stencil attachment state");
 		}
 	} else if (z.stencil_read_base_addr != 0 || z.stencil_write_base_addr != 0) {
@@ -203,8 +198,10 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 	if (!z.size.valid) {
 		DepthFatal("missing depth extent");
 	}
-	const uint32_t width  = static_cast<uint32_t>(z.size.x_max) + 1u;
-	const uint32_t height = static_cast<uint32_t>(z.size.y_max) + 1u;
+	// With a single level, the selected mip is a surface of that mip's extent at the base address.
+	const auto     mip    = z.depth_view.current_mip_level;
+	const uint32_t width  = std::max((static_cast<uint32_t>(z.size.x_max) + 1u) >> mip, 1u);
+	const uint32_t height = std::max((static_cast<uint32_t>(z.size.y_max) + 1u) >> mip, 1u);
 	if (width > 16384 || height > 16384) {
 		DepthFatal("invalid depth extent");
 	}
