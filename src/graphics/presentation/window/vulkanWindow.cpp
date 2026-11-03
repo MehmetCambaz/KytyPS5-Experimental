@@ -319,7 +319,7 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 		check_feature(features13.synchronization2, "synchronization2",
 		              required_features13.synchronization2);
 		check_feature(features13.maintenance4, "maintenance4",
-        			  required_features13.maintenance4);
+		              required_features13.maintenance4);
 		check_feature(device_features2.features.sampleRateShading, "sampleRateShading");
 		check_feature(device_features2.features.depthBiasClamp, "depthBiasClamp");
 		check_feature(device_features2.features.shaderClipDistance, "shaderClipDistance");
