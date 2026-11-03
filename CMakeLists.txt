@@ -690,6 +690,8 @@ if(BUILD_TESTING)
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --skip-redundant-unmap-drains)
 	add_test(NAME emulator_select_guarded_loads_cli
 	         COMMAND $<TARGET_FILE:kyty_emulator> --help --select-guarded-loads)
+	add_test(NAME emulator_structured_jump_tables_cli
+	         COMMAND $<TARGET_FILE:kyty_emulator> --help --structured-jump-tables)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	add_test(NAME libc_stdio_symbols COMMAND $<TARGET_FILE:libc_stdio_symbol_tests>)
