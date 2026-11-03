@@ -2359,7 +2359,6 @@ bool TextureCache::CopyImageToBufferCache(Image& image) {
 }
 
 bool TextureCache::ProcessDownloadImages(bool keep_unready) {
-	PublishStorageImages();
 	if (!ReadbacksEnabled()) {
 		return false;
 	}
