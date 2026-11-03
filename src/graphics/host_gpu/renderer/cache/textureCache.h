@@ -15,6 +15,7 @@
 #include <atomic>
 #include <bitset>
 #include <map>
+#include <optional>
 #include <type_traits>
 #include <unordered_set>
 #include <vector>
@@ -70,6 +71,7 @@ public:
 	                                        uint32_t packed_clear);
 	bool               InvalidateMemory(uint64_t address, uint64_t size, bool defer_pending_storage = false);
 	void               InvalidateMemoryFromGPU(uint64_t address, uint64_t size);
+	void               InvalidateBufferWrite(uint64_t address, uint64_t size);
 	[[nodiscard]] bool IsRegionRegistered(uint64_t address, uint64_t size);
 
 	[[nodiscard]] bool IsMeta(uint64_t address);
@@ -152,6 +154,8 @@ private:
 	[[nodiscard]] static bool SameBacking(const ImageInfo& cached, const ImageInfo& requested,
 	                                      bool exact_format);
 	[[nodiscard]] static BindingType UploadBinding(const Image& image);
+	// Colour attachment uploads need whole layers of single sample images. Other bindings pass.
+	[[nodiscard]] static bool IsValidColorAttachmentUpload(const Image& image, BindingType binding);
 
 	// Caller holds m_lock; it also serializes the per-image query epoch.
 	[[nodiscard]] ImageIds      FindImagesInRegion(uint64_t address, uint64_t size,
@@ -193,6 +197,23 @@ private:
 	void ValidateImageDesc(const ImageDesc& desc) const;
 
 	void               InvalidateCpuAliases(uint64_t address, uint64_t size);
+	// Caller holds m_lock. Refresh only the buffer-written range of an image, returning false
+	// when the full upload has to run instead.
+	[[nodiscard]] bool TryPartialRefresh(Image& image);
+	void               RefreshLinearRange(Image& image, GuestRange range);
+	// What a tiled partial refresh touches. The range is relative to the image data.
+	struct TiledRefreshPlan {
+		RefreshByteRange           range;
+		std::vector<RefreshRegion> regions;
+	};
+	[[nodiscard]] static std::optional<TiledRefreshPlan> PlanTiledRefresh(const Image& image,
+	                                                                      GuestRange   range);
+	[[nodiscard]] bool RefreshTiledRange(Image& image, GuestRange range);
+	void               MergeTiledRegions(Image& image, const TiledRefreshPlan& plan);
+	void DownloadForMerge(Image& image, const TileManager::Result& scratch,
+	                      std::span<const RefreshRegion> regions);
+	void UploadMerged(Image& image, const TileManager::Result& scratch,
+	                  std::span<const RefreshRegion> regions);
 	[[nodiscard]] bool DownloadImageMemory(ImageId id);
 
 	GraphicContext&                                   m_graphics;
@@ -215,6 +236,7 @@ private:
 	uint64_t         m_gc_tick                = 0;
 	bool             m_readback_linear_images = false;
 	bool             m_readback_tiled_images  = false;
+	bool             m_partial_buffer_refresh = false;
 	// Readbacks recorded by DownloadImageMemory() whose guest write has not run yet.
 	std::atomic<uint32_t> m_readbacks_in_flight {0};
 

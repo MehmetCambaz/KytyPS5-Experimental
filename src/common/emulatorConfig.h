@@ -95,6 +95,7 @@ struct ConfigOptions {
 	bool                   readback_tiled_images       = false;
 	bool                   sync_raw_image_buffers      = false;
 	bool                   skip_redundant_unmap_drains = false;
+	bool                   partial_buffer_refresh_enabled = false;
 	bool                   tessellation_enabled        = false;
 	bool                   occlusion_queries_enabled   = false;
 	bool                   trophy_enabled              = true;
@@ -173,6 +174,7 @@ bool ReadbackTiledImagesEnabled();
 bool SyncRawImageBuffersEnabled();
 // Skips the GPU drain when a range that is already unmapped is unmapped again.
 bool SkipRedundantUnmapDrainsEnabled();
+bool PartialBufferRefreshEnabled();
 bool TessellationEnabled();
 bool OcclusionQueriesEnabled();
 bool TrophyEnabled();
