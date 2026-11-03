@@ -120,6 +120,8 @@ public:
 	// deferred event (a write from any thread but the GPU thread) is held back until
 	// PromoteBdaSync().
 	void                   QueueBdaSync(uint64_t vaddr, uint64_t size, bool deferred = false);
+	// Uploads the queued BDA pages inside `mapped` to the buffers that hold them.
+	void SynchronizeBda(const RangeSet& mapped);
 	[[nodiscard]] RangeSet TakeBdaSync();
 	// Makes game-thread writes visible to the next BDA synchronization.
 	void               PromoteBdaSync();
@@ -157,6 +159,16 @@ private:
 	void                     ReleaseStaleBuffers(uint64_t tick);
 	// Records a stale release, so a later fault on that range counts as a refault.
 	void                     RememberReleasedRange(uint64_t begin, uint64_t end);
+	// Adds the CPU-modified pages to m_bda_upload for every buffer overlapping [begin, end).
+	void CollectBdaCopies(uint64_t begin, uint64_t end);
+	// Adds the CPU-modified pages of the provided `buffer` in [begin, end) to m_bda_upload.
+	void CollectBdaBufferCopies(Buffer& buffer, uint64_t begin, uint64_t end);
+	// Uploads everything in m_bda_upload, if anything, and empties it.
+	void FlushBdaCopies();
+	// Uploads everything in m_bda_upload through one staging allocation.
+	void UploadBdaCopies();
+	// Records the copies in m_bda_upload from `staging`, between one pair of global barriers.
+	void RecordBdaCopies(vk::Buffer staging);
 	[[nodiscard]] bool SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size,
 	                                     bool is_written, bool is_texel_buffer);
 	[[nodiscard]] vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
@@ -190,6 +202,30 @@ private:
 	StreamBuffer                                      m_download_buffer;
 	StreamBuffer                                      m_device_buffer;
 	TextureCache&                                     m_texture_cache;
+	// The buffer copies that BDA synchronization collects and uploads together. Synchronization
+	// runs before every BDA draw, so they are kept between calls to reuse the vectors' storage.
+	// Only the GPU thread synchronizes BDA, so they need no lock.
+	struct BdaUpload {
+		// A set of BufferCopy entries placed back to back in `copies`, all writing into the same
+		// buffer. Enables recording them with a single copy command.
+		struct Batch {
+			Buffer* buffer;
+			size_t  first;
+			size_t  count;
+		};
+		std::vector<vk::BufferCopy> copies;  // Staging offset, buffer offset and size of each.
+		std::vector<uint64_t>       sources; // Guest address of each copy.
+		std::vector<Batch>          batches;
+		uint64_t                    size = 0; // Staging bytes the copies use.
+
+		void Clear() {
+			copies.clear();
+			sources.clear();
+			batches.clear();
+			size = 0;
+		}
+	};
+	BdaUpload                                         m_bda_upload;
 	uint64_t                                          m_total_used_memory  = 0;
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
