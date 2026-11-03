@@ -192,7 +192,11 @@ std::optional<ValueOpcode> WaveReduction(ValueOpcode operation) {
 		case ValueOpcode::IAdd32: return ValueOpcode::SubgroupIAddU32;
 		case ValueOpcode::UMin32: return ValueOpcode::SubgroupUMinU32;
 		case ValueOpcode::UMax32: return ValueOpcode::SubgroupUMaxU32;
+		case ValueOpcode::SMin32: return ValueOpcode::SubgroupSMinU32;
+		case ValueOpcode::SMax32: return ValueOpcode::SubgroupSMaxU32;
+		case ValueOpcode::BitwiseAnd32: return ValueOpcode::SubgroupAndU32;
 		case ValueOpcode::BitwiseOr32: return ValueOpcode::SubgroupOrU32;
+		case ValueOpcode::BitwiseXor32: return ValueOpcode::SubgroupXorU32;
 		default: return std::nullopt;
 	}
 }

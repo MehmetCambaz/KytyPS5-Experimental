@@ -695,7 +695,7 @@ void TestCompleteWaveReduction() {
     Shift, FetchInactive, BoundControl, Dpp8, MoveExec, UpdateExec,
     Previous, DppSource, CrossExec, CrossRow, CrossSelectorLow,
     CrossSelectorHigh, CrossFetch, CrossBound, CrossSource, FinalExec,
-    Endpoint, EndpointSource, CrossBlock, WrongOperation, Or
+    Endpoint, EndpointSource, CrossBlock, WrongOperation, Or, SMin, SMax, And, Xor
   };
   for (const auto test : {Case::Masked, Case::ScalarExec, Case::Wave32,
        Case::Wave32Rows, Case::Wave32Maximum, Case::RowMask, Case::BankMask,
@@ -704,7 +704,8 @@ void TestCompleteWaveReduction() {
        Case::CrossExec, Case::CrossRow, Case::CrossSelectorLow,
        Case::CrossSelectorHigh, Case::CrossFetch, Case::CrossBound,
        Case::CrossSource, Case::FinalExec, Case::Endpoint, Case::EndpointSource,
-       Case::CrossBlock, Case::WrongOperation, Case::Or}) {
+       Case::CrossBlock, Case::WrongOperation, Case::Or, Case::SMin, Case::SMax,
+       Case::And, Case::Xor}) {
     Fixture fixture(test == Case::CrossBlock ? 2 : 1);
     const auto source = fixture.Emit(ValueOpcode::LaneId);
     const auto mask = fixture.Emit(ValueOpcode::ULessThan32, {source, Value(19u)});
@@ -720,10 +721,16 @@ void TestCompleteWaveReduction() {
       enabled = fixture.Emit(ValueOpcode::INotEqual32,
           {fixture.Emit(ValueOpcode::BitwiseAnd32, {shifted, Value(1u)}), Value(0u)});
     }
-    // UMax and OR scans seed lanes outside EXEC with zero.
+    // Each operation uses its identity for lanes outside EXEC.
     const bool maximum = test == Case::Wave32Maximum;
     const bool bitwise_or = test == Case::Or;
-    const uint32_t neutral = maximum || bitwise_or ? 0u : UINT32_MAX;
+    const bool signed_min = test == Case::SMin;
+    const bool signed_max = test == Case::SMax;
+    const bool bitwise_and = test == Case::And;
+    const bool bitwise_xor = test == Case::Xor;
+    uint32_t neutral = maximum || bitwise_or || bitwise_xor ? 0u : UINT32_MAX;
+    if (signed_min) neutral = 0x7fffffffu;
+    if (signed_max) neutral = 0x80000000u;
     const auto seed = fixture.Emit(ValueOpcode::SelectU32, {mask, source, Value(neutral)});
     auto prefix = fixture.Emit(ValueOpcode::SelectU32, {enabled, seed, source});
     Value preserved;
@@ -733,7 +740,23 @@ void TestCompleteWaveReduction() {
       operation = ValueOpcode::BitwiseOr32;
       reduction_opcode = ValueOpcode::SubgroupOrU32;
     }
-    if (test == Case::WrongOperation) operation = ValueOpcode::BitwiseXor32;
+    if (signed_min) {
+      operation = ValueOpcode::SMin32;
+      reduction_opcode = ValueOpcode::SubgroupSMinU32;
+    }
+    if (signed_max) {
+      operation = ValueOpcode::SMax32;
+      reduction_opcode = ValueOpcode::SubgroupSMaxU32;
+    }
+    if (bitwise_and) {
+      operation = ValueOpcode::BitwiseAnd32;
+      reduction_opcode = ValueOpcode::SubgroupAndU32;
+    }
+    if (bitwise_xor) {
+      operation = ValueOpcode::BitwiseXor32;
+      reduction_opcode = ValueOpcode::SubgroupXorU32;
+    }
+    if (test == Case::WrongOperation) operation = ValueOpcode::IMul32;
     for (const uint32_t shift : {1u, 2u, 4u, 8u}) {
       DppMoveFlags flags{.control = 0x110u + shift};
       if (shift == 2) {
@@ -793,7 +816,8 @@ void TestCompleteWaveReduction() {
     const uint32_t wave_size = test == Case::Wave32 || rows ? 32u : 64u;
     ConstantPropagationPass(fixture.program.blocks, wave_size);
     const auto stats = EliminateReadLane(fixture.program, wave_size);
-    const bool matches = test == Case::Masked || rows || bitwise_or;
+    const bool matches = test == Case::Masked || rows || bitwise_or || signed_min || signed_max ||
+                         bitwise_and || bitwise_xor;
     Check(stats.rewritten_reductions == (matches ? 1u : 0u) && stats.rewritten_reads == 0,
           ("wave reduction proof failed case " + std::to_string(static_cast<unsigned>(test))).c_str());
     if (matches) {

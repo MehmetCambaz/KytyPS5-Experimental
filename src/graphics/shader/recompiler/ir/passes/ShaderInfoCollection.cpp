@@ -535,7 +535,11 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 		case ValueOpcode::SubgroupIAddU32:
 		case ValueOpcode::SubgroupUMinU32:
 		case ValueOpcode::SubgroupUMaxU32:
-		case ValueOpcode::SubgroupOrU32: info.subgroup_arithmetic = true; break;
+		case ValueOpcode::SubgroupSMinU32:
+		case ValueOpcode::SubgroupSMaxU32:
+		case ValueOpcode::SubgroupAndU32:
+		case ValueOpcode::SubgroupOrU32:
+		case ValueOpcode::SubgroupXorU32: info.subgroup_arithmetic = true; break;
 		case ValueOpcode::DppMoveU32:
 		case ValueOpcode::ReadFirstLane:
 		case ValueOpcode::ReadLane: {
