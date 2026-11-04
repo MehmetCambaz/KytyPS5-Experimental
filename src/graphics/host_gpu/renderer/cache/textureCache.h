@@ -119,20 +119,12 @@ private:
 	using ImageIds       = InlinePageOwnerList<ImageId, 16>;
 	using ImagePageTable = MultiLevelPageTable<ImageIds, 20, 44, 14>;
 
-	// Callers have validated the nonempty 44-bit range with TryGetPageRange.
+	// Callers pass a nonempty, valid guest range.
 	template <typename Func>
 	static void ForEachPage(uint64_t address, size_t size, Func&& func) {
-		using FuncReturn = typename std::invoke_result<Func, uint64_t>::type;
-		static constexpr bool RETURNS_BOOL = std::is_same_v<FuncReturn, bool>;
 		const uint64_t page_end = (address + size - 1) >> ImagePageTable::kPageBits;
 		for (uint64_t page = address >> ImagePageTable::kPageBits; page <= page_end; ++page) {
-			if constexpr (RETURNS_BOOL) {
-				if (func(page)) {
-					break;
-				}
-			} else {
-				func(page);
-			}
+			func(page);
 		}
 	}
 
@@ -157,9 +149,8 @@ private:
 	// Colour attachment uploads need whole layers of single sample images. Other bindings pass.
 	[[nodiscard]] static bool IsValidColorAttachmentUpload(const Image& image, BindingType binding);
 
-	// Caller holds m_lock; it also serializes the per-image query epoch.
-	[[nodiscard]] ImageIds      FindImagesInRegion(uint64_t address, uint64_t size,
-	                                               bool page_overlap) const;
+	// Caller holds m_lock; it also serializes Image::picked.
+	[[nodiscard]] ImageIds      FindImagesInRegion(uint64_t address, uint64_t size) const;
 	[[nodiscard]] OverlapResult ResolveOverlap(const ImageInfo& requested, BindingType binding,
 	                                           ImageId cached, ImageId merged);
 	[[nodiscard]] ImageId       ResolveDepthOverlap(const ImageInfo& requested, BindingType binding,
@@ -196,6 +187,7 @@ private:
 	void CopyImageMip(ImageId destination, ImageId source, uint32_t mip, uint32_t layer);
 	void ValidateImageDesc(const ImageDesc& desc) const;
 
+	// Caller holds m_lock.
 	void               InvalidateCpuAliases(uint64_t address, uint64_t size);
 	// Caller holds m_lock. Refresh only the buffer-written range of an image, returning false
 	// when the full upload has to run instead.

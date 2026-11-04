@@ -553,23 +553,20 @@ void TestImageHeapKinds() {
   const auto float_kind = kind_of(Format::k32_32_32_32Float, Type::kColor2DArray);
   const auto uint_kind = kind_of(Format::k32UInt, Type::kColor2DArray);
   const auto cube_kind = kind_of(Format::k32_32_32_32Float, Type::kCube);
-  const auto srgb_kind = kind_of(Format::k8Srgb, Type::kColor2DArray);
   auto volume = descriptor(Format::k32_32_32_32Float, Type::kColor3D);
-  Check(float_kind != 0u && uint_kind != 0u && cube_kind != 0u && srgb_kind != 0u &&
-            float_kind != uint_kind && float_kind != srgb_kind &&
+	Check(float_kind != 0u && uint_kind != 0u && cube_kind != 0u &&
+	          float_kind != uint_kind &&
             float_kind != cube_kind && kind_of(Format::kInvalid, Type::kColor2DArray) == 0u &&
             ImageHeapKind(root, volume) == 0u &&
             std::ranges::all_of(volume.dwords, [](uint32_t word) { return word == 0u; }),
         "heap kinds did not separate typed entries or null mismatched ones");
   const auto resource = ImageHeapResource(root, uint_kind);
   const auto cube_resource = ImageHeapResource(root, cube_kind);
-  const auto srgb_resource = ImageHeapResource(root, srgb_kind);
   auto other = root;
   other.source = 9u;
   Check(resource.numeric_class == Libs::Graphics::Prospero::TextureNumericClass::Uint &&
-            !resource.cube && !resource.srgb_decode && cube_resource.cube &&
+		!resource.cube && resource.srgb_decode == Format::kInvalid && cube_resource.cube &&
             cube_resource.numeric_class == Libs::Graphics::Prospero::TextureNumericClass::Float &&
-            srgb_resource.srgb_decode && !srgb_resource.cube &&
             resource.resource_class == ImageResourceClass::Sampled && resource.read &&
             ImageHeapResource(root, 0u) == ImageHeapResource(other, 0u),
         "heap kind resources lost their type or kept root identity");
@@ -5564,14 +5561,6 @@ void TestImagesSamplersAndAliases() {
   fixture.Emit(ValueOpcode::ImageAtomicIAdd32,
                {storage, image_address, Value(1u), Value(true)},
                fixture.AddMemory(storage_memory, 16));
-
-  const auto buffer = fixture.Buffer(
-      {image_words[0], image_words[1], image_words[2], image_words[3]}, 20);
-  MemoryInfo buffer_memory;
-  buffer_memory.kind = ResourceKind::Buffer;
-  fixture.Emit(ValueOpcode::LoadBufferU32,
-               {buffer, Value(0u), Value(0u), Value(0u), Value(true)},
-               fixture.AddMemory(buffer_memory, 20));
   fixture.PlanAndTrack();
 
   Check(fixture.program.info.images.size() == 3 &&
@@ -5589,8 +5578,6 @@ void TestImagesSamplersAndAliases() {
   const auto sampler_source = fixture.program.info.samplers[0].source;
   Check(fixture.program.descriptor_sources[sampler_source].dwords[3].U32() == 0,
         "unused sampler border color was not canonicalized");
-  Check(fixture.program.info.buffers[0].image_alias == 0,
-        "buffer/image descriptor alias was not linked");
 }
 
 void TestIndependentImageSamplerPairs() {
@@ -8710,13 +8697,14 @@ void TestNarrowSrgbImageDecode() {
   ResourceSpecialization narrow;
   auto user_data = descriptor(Format::k8_8Srgb);
   Check(MaterializeResources(plan, {.user_data = user_data}, snapshot, narrow) &&
-            narrow.images.size() == 1u && narrow.images[0].srgb_decode,
+	          narrow.images.size() == 1u && narrow.images[0].srgb_decode == Format::k8_8Srgb,
         "narrow sRGB image did not request shader decoding");
 
   ResourceSpecialization wide;
   user_data = descriptor(Format::k8_8_8_8Srgb);
   Check(MaterializeResources(plan, {.user_data = user_data}, snapshot, wide) &&
-            wide.images.size() == 1u && !wide.images[0].srgb_decode && wide != narrow,
+	          wide.images.size() == 1u && wide.images[0].srgb_decode == Format::kInvalid &&
+	          wide != narrow,
         "native four-channel sRGB did not select its own specialization");
 }
 

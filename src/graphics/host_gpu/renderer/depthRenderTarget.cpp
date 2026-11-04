@@ -162,14 +162,11 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 	if (samples == 0) {
 		DepthFatal("unsupported depth fragment count: %u", z.z_info.num_samples);
 	}
-	const auto view = ResolveTargetViewInfo(z.depth_view.slice_start, z.depth_view.slice_max);
-	switch (view.type) {
-		case TargetViewType::Image2D:
-		case TargetViewType::Image2DArray: break;
-		case TargetViewType::Unsupported:
-			DepthFatal("invalid depth view: base=%u last=%u", z.depth_view.slice_start,
-			           z.depth_view.slice_max);
+	if (z.depth_view.slice_start > z.depth_view.slice_max) {
+		DepthFatal("invalid depth view: base=%u last=%u", z.depth_view.slice_start,
+		           z.depth_view.slice_max);
 	}
+	const auto view = ResolveTargetViewInfo(z.depth_view.slice_start, z.depth_view.slice_max);
 	// EXPCLEAR permits an HTile acceleration state; the host attachment is already expanded.
 	if (const char* unsupported = UnrepresentableDepthState(z, depth_address)) {
 		DepthFatal("unsupported depth register state: %s (max_mip=%u view_mip=%u "
@@ -217,11 +214,11 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 	}
 	const auto     guest_format = policy->guest_format;
 	const uint32_t bytes        = policy->bytes_per_element;
-	const auto     pitch        = TileGetDepthPitch(width, bytes, z.z_info.num_samples);
+	const auto     pitch        = TileGetRenderTargetPitch(width, bytes, z.z_info.num_samples);
 	TileSizeAlign depth_size {};
 	TileSizeAlign stencil_size {};
 	TileSizeAlign htile_size {};
-	if (!TileGetDepthSize(width, height, 0, z.z_info.format, z.stencil_info.format, has_htile,
+	if (!TileGetDepthSize(width, height, z.z_info.format, z.stencil_info.format, has_htile,
 	                      stencil_size, htile_size, depth_size, z.z_info.num_samples) ||
 	    depth_size.align != 65536 || depth_size.size == 0 ||
 	    (has_stencil != (stencil_size.align == 65536 && stencil_size.size != 0)) ||
@@ -420,9 +417,9 @@ bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
 	auto& destination = cache.GetImage(write_id);
 	EXIT_IF(read_id == write_id || source.backing.format != destination.backing.format);
 
-	auto& scheduler = m_context.GetCommandScheduler();
-	scheduler.EndRendering();
-	const auto command = scheduler.Current().Handle();
+	buffer.EndRendering();
+	const auto command = buffer.Handle();
+
 	const ImageSubresourceRange range {read_desc.view_info.base_level, 1,
 	                                  read_desc.view_info.base_layer,
 	                                  read_desc.view_info.layer_count};

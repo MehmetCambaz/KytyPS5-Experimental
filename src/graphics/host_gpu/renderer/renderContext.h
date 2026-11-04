@@ -92,7 +92,6 @@ private:
 	std::unique_ptr<GuestGpu> m_gpu;
 	VideoOut::VideoOutDriver* m_video_out = nullptr;
 	bool                      m_fault_process_pending = false;
-	bool                      m_bda_logged = false;
 	// Read once so shutdown never reaches for a released config.
 	const bool                m_skip_redundant_unmap_drains;
 

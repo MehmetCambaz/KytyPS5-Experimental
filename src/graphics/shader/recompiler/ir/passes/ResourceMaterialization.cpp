@@ -958,7 +958,6 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 			                static_cast<uint32_t>(format)));
 		}
 		const bool storage      = base.resource_class == ImageResourceClass::Storage;
-		image.srgb_decode       = !storage && Prospero::TextureNeedsShaderSrgbDecode(format);
 		image.fmask             = Prospero::IsFmaskTextureFormat(format);
 		if (image.fmask) {
 			if (storage || base.depth_compare ||
@@ -974,6 +973,18 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		    static_cast<Prospero::TileMode>((descriptor.dwords[3] >> 20u) & 0x1fu) ==
 		        Prospero::TileMode::kDepth;
 		image.conversion_format = depth_bits ? format : ImageConversionFormat(format);
+		// SKIP_DEGAMMA (S# bit 31) reads sRGB texels as stored.
+		image.skip_degamma = Prospero::IsSrgbFormat(format) &&
+		    std::ranges::any_of(program.info.sampled_pairs, [&](const auto& pair) {
+			    return pair.image == base_index && pair.sampler < snapshot.samplers.size() &&
+			           (snapshot.samplers[pair.sampler].dwords[0] >> 31u) != 0u;
+		    });
+		// The shader decodes direct 8 and 8_8 sRGB textures where the device has no sRGB view.
+		if (!storage && !base.depth_compare && !image.skip_degamma &&
+		    image.indirect_root == ImageResource::NoIndirectImage &&
+		    (format == Prospero::BufferFormat::k8Srgb || format == Prospero::BufferFormat::k8_8Srgb)) {
+			image.srgb_decode = format;
+		}
 		if (storage || image.conversion_format != Prospero::BufferFormat::kInvalid) {
 			image.shader_swizzle = DescriptorImageSwizzle(descriptor);
 		}
@@ -1798,9 +1809,7 @@ uint32_t ImageHeapKind(const ImageResource& root, DescriptorValue& value) {
 		value.dwords.fill(0u);
 		return 0u;
 	}
-	const auto cube = DescriptorIsCube(value) ? 1u : 0u;
-	const auto srgb = Prospero::TextureNeedsShaderSrgbDecode(format) ? 1u : 0u;
-	return 1u + (static_cast<uint32_t>(numeric_class) * 2u + cube) * 2u + srgb;
+	return 1u + static_cast<uint32_t>(numeric_class) * 2u + (DescriptorIsCube(value) ? 1u : 0u);
 }
 
 ImageResource ImageHeapResource(const ImageResource& root, uint32_t kind) {
@@ -1813,11 +1822,8 @@ ImageResource ImageHeapResource(const ImageResource& root, uint32_t kind) {
 	resource.depth_compare          = root.depth_compare;
 	resource.r128                   = root.r128;
 	if (kind != 0u) {
-		auto code              = kind - 1u;
-		resource.srgb_decode   = (code & 1u) != 0u;
-		code                 >>= 1u;
-		resource.cube          = (code & 1u) != 0u;
-		resource.numeric_class = static_cast<Prospero::TextureNumericClass>(code / 2u);
+		resource.numeric_class = static_cast<Prospero::TextureNumericClass>((kind - 1u) / 2u);
+		resource.cube          = ((kind - 1u) & 1u) != 0u;
 	}
 	return resource;
 }
@@ -1873,6 +1879,7 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		image.indirect_mapping_offset    = source.indirect_mapping_offset;
 		image.indirect_search_iterations = source.indirect_search_iterations;
 		image.cube                       = source.cube;
+		image.skip_degamma               = source.skip_degamma;
 		image.heap                       = source.heap;
 		image.indirect_resources.clear();
 	}
@@ -2057,11 +2064,6 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		auto& memory = memory_info[index];
 		if (live_image_memory[index] && memory.kind == ResourceKind::Image && !memory.planning_only) {
 			memory.resource = image_remap[memory.resource];
-		}
-	}
-	for (auto& buffer: buffers) {
-		if (buffer.image_alias != BufferResource::NoImageAlias) {
-			buffer.image_alias = image_remap[buffer.image_alias];
 		}
 	}
 	for (auto& pair: sampled_pairs) {

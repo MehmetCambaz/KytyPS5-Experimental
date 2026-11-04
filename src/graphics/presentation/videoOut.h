@@ -37,7 +37,6 @@ public:
 	                       int64_t flip_arg, uint64_t& request_id);
 	void PrepareFlip(uint64_t request_id, Graphics::CommandBuffer& buffer);
 	void CompleteFlip(uint64_t request_id);
-	void SubmitFlipPreparation(uint64_t request_id);
 	void WaitForSubmitSlot(int handle);
 	bool IsFlipPending(int handle, int index);
 	// Completed flips wake the attached GPU's suspended queues; detach before destroying it.

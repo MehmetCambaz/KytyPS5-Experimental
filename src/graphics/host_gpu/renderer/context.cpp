@@ -19,15 +19,6 @@ namespace Libs::Graphics {
 CommandBuffer::CommandBuffer(CommandScheduler& scheduler)
     : m_context(scheduler.Context()), m_graphics(scheduler.Graphics()) {}
 
-bool CommandBuffer::IsInvalid() const {
-	return m_buffer == nullptr;
-}
-
-vk::CommandBuffer CommandBuffer::Handle() const {
-	EXIT_IF(IsInvalid());
-	return m_buffer;
-}
-
 void CommandBuffer::Begin() {
 	EXIT_IF(m_rendering || IsInvalid());
 	auto buffer = Handle();
@@ -49,55 +40,8 @@ void CommandBuffer::End() const {
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 }
 
-void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0, uint32_t arg1,
-                                 uint32_t arg2, uint32_t arg3, uint64_t arg4) {
-	m_debug_op        = op;
-	m_debug_submit_id = submit_id;
-	m_debug_arg0      = arg0;
-	m_debug_arg1      = arg1;
-	m_debug_arg2      = arg2;
-	m_debug_arg3      = arg3;
-	m_debug_arg4      = arg4;
-}
-
-static bool RequestsClear(const RenderState& state) {
-	for (uint32_t i = 0; i < state.num_color_attachments; i++) {
-		if (state.color_attachments[i].is_clear) {
-			return true;
-		}
-	}
-	const auto& depth_stencil = state.depth_stencil_attachment;
-	return (depth_stencil.has_depth && depth_stencil.depth_clear) ||
-	       (depth_stencil.has_stencil && depth_stencil.stencil_clear);
-}
-
-static bool SameAttachment(const RenderAttachment& a, const RenderAttachment& b) {
-	return a.image_view == b.image_view && a.image_layout == b.image_layout &&
-	       a.has_depth == b.has_depth && a.has_stencil == b.has_stencil;
-}
-
-static bool SameTargets(const RenderState& a, const RenderState& b) {
-	if (a.width != b.width || a.height != b.height || a.num_layers != b.num_layers ||
-	    a.num_color_attachments != b.num_color_attachments ||
-	    !SameAttachment(a.depth_stencil_attachment, b.depth_stencil_attachment)) {
-		return false;
-	}
-	for (uint32_t i = 0; i < a.num_color_attachments; i++) {
-		if (!SameAttachment(a.color_attachments[i], b.color_attachments[i])) {
-			return false;
-		}
-	}
-	return true;
-}
-
 void CommandBuffer::BeginRendering(const RenderState& state) const {
 	if (m_rendering && m_render_state == state) {
-		return;
-	}
-	// A draw that only loads the targets can continue a pass that began by clearing them: the
-	// clear already ran. Track the pass as loading so that a later clear starts a new one.
-	if (m_rendering && !RequestsClear(state) && SameTargets(m_render_state, state)) {
-		m_render_state = state;
 		return;
 	}
 	EXIT_IF(state.width == 0 || state.height == 0 || state.num_layers == 0 ||
@@ -109,10 +53,8 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 		const auto& attachment = state.color_attachments[i];
 		colors[i].imageView    = attachment.image_view;
 		colors[i].imageLayout  = attachment.image_layout;
-		colors[i].loadOp =
-		    attachment.is_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad;
-		colors[i].storeOp                 = vk::AttachmentStoreOp::eStore;
-		colors[i].clearValue.color.uint32 = attachment.clear_value;
+		colors[i].loadOp       = vk::AttachmentLoadOp::eLoad;
+		colors[i].storeOp      = vk::AttachmentStoreOp::eStore;
 	}
 
 	const auto&                 depth_stencil = state.depth_stencil_attachment;
@@ -140,11 +82,8 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	rendering.pDepthAttachment     = depth_stencil.has_depth ? &depth : nullptr;
 	rendering.pStencilAttachment   = depth_stencil.has_stencil ? &stencil : nullptr;
 	Handle().beginRendering(rendering);
-	// The open pass holds the cleared contents, so a later clear begins a new pass.
 	m_render_state = state;
-	for (auto& color: m_render_state.color_attachments) {
-		color.is_clear = false;
-	}
+	// The open pass holds the cleared contents, so a later clear begins a new pass.
 	m_render_state.depth_stencil_attachment.depth_clear   = false;
 	m_render_state.depth_stencil_attachment.stencil_clear = false;
 	m_rendering                                           = true;
@@ -155,8 +94,7 @@ void CommandBuffer::EndRendering() const {
 		return;
 	}
 	Handle().endRendering();
-	m_rendering    = false;
-	m_render_state = {};
+	m_rendering = false;
 }
 
 } // namespace Libs::Graphics
