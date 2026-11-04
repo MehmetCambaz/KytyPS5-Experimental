@@ -32,12 +32,7 @@
 #include <xxhash.h>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #include <windows.h>
-#undef min
-#undef max
 #endif
 
 namespace Libs::Graphics {

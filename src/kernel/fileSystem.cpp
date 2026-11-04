@@ -3,11 +3,9 @@
 #include "common/archive.h"
 #include "common/assert.h"
 #include "common/common.h"
-#include "common/dateTime.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
-#include "common/hash.h"
 #include "common/logging/log.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
@@ -19,13 +17,16 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <climits>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <random>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -65,8 +66,9 @@ private:
 };
 
 struct File {
-	// What f serves when it is opened in memory; declared first, so that it outlives f.
+	// Optional synthesized read-only contents (currently the Unreal command line override).
 	std::string                         memory;
+	uint64_t                            memory_offset = 0;
 	Common::File                        f;
 	std::string                         name;
 	std::filesystem::path               real_name;
@@ -117,9 +119,18 @@ static void FillRandomBuffer(void* buf, size_t nbytes) {
 	}
 }
 
-static void SecToTimespec(KernelTimespec* ts, double sec) {
-	ts->tv_sec  = static_cast<int64_t>(sec);
-	ts->tv_nsec = static_cast<int64_t>((sec - static_cast<double>(ts->tv_sec)) * 1000000000.0);
+// Without times (directories, devices) the current time is reported.
+static void SetStatTimes(FileStat* stat, std::optional<Common::File::Times> times) {
+	if (!times) {
+		const int64_t now =
+		    std::chrono::nanoseconds(std::chrono::system_clock::now().time_since_epoch()).count();
+		times = {now, now};
+	}
+	constexpr int64_t NANOS_PER_SEC = 1000000000;
+	stat->st_atim     = {times->access_ns / NANOS_PER_SEC, times->access_ns % NANOS_PER_SEC};
+	stat->st_mtim     = {times->write_ns / NANOS_PER_SEC, times->write_ns % NANOS_PER_SEC};
+	stat->st_ctim     = stat->st_atim;
+	stat->st_birthtim = stat->st_mtim;
 }
 
 static uint64_t AlignDown(uint64_t value, uint64_t alignment) {
@@ -148,7 +159,7 @@ static std::vector<uint8_t> PackDirents(const std::vector<Common::File::DirEntry
 			dirents.resize(offset + DIR_BLOCK_SIZE);
 		}
 		*reinterpret_cast<uint32_t*>(dirents.data() + offset) =
-		    Common::hash(name.data(), static_cast<uint32_t>(name.size()));
+		    static_cast<uint32_t>(std::hash<std::string_view> {}(name));
 		*reinterpret_cast<uint16_t*>(dirents.data() + offset + 4) = static_cast<uint16_t>(reclen);
 		dirents[offset + 6]                                       = entry.is_file ? 8 : 4;
 		dirents[offset + 7] = static_cast<uint8_t>(name.size());
@@ -595,8 +606,8 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
 		                             ? UnrealCommandLine(file->name, file->real_name)
 		                             : std::nullopt) {
 			file->memory = std::move(*served);
-			result =
-			    file->f.OpenInMem(file->memory.data(), static_cast<uint32_t>(file->memory.size()));
+		file->memory_offset = 0;
+		result              = true;
 
 			LOGF_COLOR(result ? Log::Color::Green : Log::Color::Red,
 			           "\tOpen: %s, served from memory: %s, %s\n",
@@ -617,7 +628,7 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode) {
 			file->f.Seek(file->f.Size());
 		}
 
-		if (!result || file->f.IsInvalid()) {
+		if (!result || (file->memory.empty() && file->f.IsInvalid())) {
 			g_files->DeleteDescriptor(descriptor);
 			return KERNEL_ERROR_EACCES;
 		}
@@ -726,6 +737,22 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 	}
 
 	file->mutex.Lock();
+	if (!file->memory.empty()) {
+		const auto remaining = file->memory_offset < file->memory.size()
+		                           ? file->memory.size() - file->memory_offset
+		                           : 0;
+		const auto bytes = static_cast<uint32_t>(std::min<uint64_t>(nbytes, remaining));
+		Memory::InvalidateMemory(reinterpret_cast<uint64_t>(buf), bytes);
+		if (bytes != 0) {
+			memcpy(buf, file->memory.data() + file->memory_offset, bytes);
+			file->memory_offset += bytes;
+		}
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileReadBytes, bytes);
+		file->mutex.Unlock();
+		LOGF("\tRead %u in-memory bytes from: %s\n", bytes,
+		     Common::PathToString(file->real_name).c_str());
+		return bytes;
+	}
 
 	bool       is_invalid = file->f.IsInvalid();
 	const auto pos        = file->f.Tell();
@@ -852,6 +879,20 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 	}
 
 	file->mutex.Lock();
+	if (!file->memory.empty()) {
+		const auto position  = static_cast<uint64_t>(offset);
+		const auto remaining = position < file->memory.size() ? file->memory.size() - position : 0;
+		const auto bytes     = static_cast<uint32_t>(std::min<uint64_t>(nbytes, remaining));
+		Memory::InvalidateMemory(reinterpret_cast<uint64_t>(buf), bytes);
+		if (bytes != 0) {
+			memcpy(buf, file->memory.data() + position, bytes);
+		}
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileReadBytes, bytes);
+		file->mutex.Unlock();
+		LOGF("\tRead %u in-memory bytes (pos = %" PRId64 ") from: %s\n", bytes, offset,
+		     Common::PathToString(file->real_name).c_str());
+		return bytes;
+	}
 
 	bool       is_invalid = file->f.IsInvalid();
 	auto       pos        = file->f.Tell();
@@ -942,6 +983,31 @@ int64_t KYTY_SYSV_ABI KernelPreadv(int d, const KernelIovec* iov, int iovcnt, in
 			}
 		}
 		return static_cast<int64_t>(total);
+	}
+	if (!file->memory.empty()) {
+		uint64_t position   = static_cast<uint64_t>(offset);
+		int64_t  bytes_read = 0;
+		for (const auto& buffer: buffers) {
+			if (position >= file->memory.size()) {
+				break;
+			}
+			const auto count = static_cast<uint32_t>(std::min<uint64_t>(
+			    buffer.iov_len, file->memory.size() - position));
+			if (count == 0) {
+				continue;
+			}
+			Memory::InvalidateMemory(reinterpret_cast<uint64_t>(buffer.iov_base), count);
+			memcpy(buffer.iov_base, file->memory.data() + position, count);
+			Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileReadBytes, count);
+			bytes_read += count;
+			position += count;
+			if (count < buffer.iov_len) {
+				break;
+			}
+		}
+		LOGF("\tReadv %" PRId64 " in-memory bytes (pos = %" PRId64 ", iovcnt = %d) from: %s\n",
+		     bytes_read, offset, iovcnt, Common::PathToString(file->real_name).c_str());
+		return bytes_read;
 	}
 	if (file->f.IsInvalid()) {
 		return KERNEL_ERROR_EIO;
@@ -1135,7 +1201,7 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence) {
 
 	Common::LockGuard lock(file->mutex);
 
-	if (!file->directory && file->f.IsInvalid()) {
+	if (!file->directory && file->memory.empty() && file->f.IsInvalid()) {
 		LOGF("\tfile is invalid\n");
 		return KERNEL_ERROR_EIO;
 	}
@@ -1143,8 +1209,14 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence) {
 	uint64_t base = 0;
 	switch (whence) {
 		case 0: break;
-		case 1: base = file->directory ? file->dents_offset : file->f.Tell(); break;
-		case 2: base = file->directory ? file->dirents.size() : file->f.Size(); break;
+		case 1:
+			base = file->directory ? file->dents_offset
+			                       : file->memory.empty() ? file->f.Tell() : file->memory_offset;
+			break;
+		case 2:
+			base = file->directory ? file->dirents.size()
+			                       : file->memory.empty() ? file->f.Size() : file->memory.size();
+			break;
 		default: return KERNEL_ERROR_EINVAL;
 	}
 
@@ -1167,6 +1239,8 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence) {
 
 	if (file->directory) {
 		file->dents_offset = position;
+	} else if (!file->memory.empty()) {
+		file->memory_offset = position;
 	} else {
 		file->f.Seek(position);
 		EXIT_IF(file->f.Tell() != position);
@@ -1193,8 +1267,25 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb) {
 		return OK;
 	}
 
-	auto real_file_name = g_mount_points->ResolvePath(path);
+	const auto real_name = g_mount_points->ResolvePath(path);
+	if (const auto served = UnrealCommandLine(path, real_name)) {
+		const auto info = Common::File::GetInfo(real_name);
+		if (!info || !info->is_file) {
+			return KERNEL_ERROR_ENOENT;
+		}
+		FileStat stat {};
+		stat.st_mode    = 0100777u;
+		stat.st_size    = static_cast<int64_t>(served->size());
+		stat.st_blksize = 512;
+		stat.st_blocks  = (stat.st_size + 511) / 512;
+		SetStatTimes(&stat, Common::File::GetTimes(real_name));
+		*sb = stat;
+		return OK;
+	}
+	return StatHostPath(real_name, sb);
+}
 
+int StatHostPath(const std::filesystem::path& real_file_name, FileStat* sb) {
 	const auto info = Common::File::GetInfo(real_file_name);
 	if (!info) {
 		LOGF("\t file not found\n");
@@ -1206,28 +1297,19 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb) {
 	FileStat stat {};
 	stat.st_mode = 0000777u | (is_dir ? 0040000u : 0100000u);
 
-	auto at = Common::DateTime::FromSystemUTC();
-	auto wt = at;
-
 	if (is_dir) {
 		stat.st_size =
 		    static_cast<int64_t>(PackDirents(Common::File::GetDirEntries(real_file_name)).size());
 		stat.st_blksize = 512;
 		stat.st_blocks  = stat.st_size / 512;
 	} else {
-		const auto served = UnrealCommandLine(path, real_file_name);
-		stat.st_size      = static_cast<int64_t>(served ? served->size() : info->size);
-		stat.st_blksize   = 512;
-		stat.st_blocks    = (stat.st_size + 511) / 512;
-
-		Common::File::GetLastAccessAndWriteTimeUTC(real_file_name, &at, &wt);
+		stat.st_size    = static_cast<int64_t>(info->size);
+		stat.st_blksize = 512;
+		stat.st_blocks  = (stat.st_size + 511) / 512;
 	}
 
-	SecToTimespec(&stat.st_atim, at.ToUnix());
-	SecToTimespec(&stat.st_mtim, wt.ToUnix());
-	stat.st_ctim     = stat.st_atim;
-	stat.st_birthtim = stat.st_mtim;
-	*sb              = stat;
+	SetStatTimes(&stat, is_dir ? std::nullopt : Common::File::GetTimes(real_file_name));
+	*sb = stat;
 
 	return OK;
 }
@@ -1256,8 +1338,7 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb) {
 	FileStat stat {};
 	stat.st_mode = 0000777u | (file->directory ? 0040000u : 0100000u);
 
-	auto at = Common::DateTime::FromSystemUTC();
-	auto wt = at;
+	std::optional<Common::File::Times> times;
 
 	if (file->special != SpecialFile::None) {
 		stat.st_mode    = 0020644u;
@@ -1267,9 +1348,10 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb) {
 	} else if (!file->directory) {
 		file->mutex.Lock();
 
-		bool is_invalid = file->f.IsInvalid();
-		auto size       = file->f.Size();
-		file->f.GetLastAccessAndWriteTimeUTC(&at, &wt);
+		const bool is_memory  = !file->memory.empty();
+		const bool is_invalid = !is_memory && file->f.IsInvalid();
+		const auto size       = is_memory ? file->memory.size() : file->f.Size();
+		times                 = is_memory ? Common::File::GetTimes(file->real_name) : file->f.GetTimes();
 
 		file->mutex.Unlock();
 
@@ -1287,11 +1369,8 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb) {
 		stat.st_blocks  = stat.st_size / 512;
 	}
 
-	SecToTimespec(&stat.st_atim, at.ToUnix());
-	SecToTimespec(&stat.st_mtim, wt.ToUnix());
-	stat.st_ctim     = stat.st_atim;
-	stat.st_birthtim = stat.st_mtim;
-	*sb              = stat;
+	SetStatTimes(&stat, times);
+	*sb = stat;
 
 	return OK;
 }
@@ -1431,15 +1510,13 @@ int KYTY_SYSV_ABI KernelUnlink(const char* path) {
 		return KERNEL_ERROR_EROFS;
 	}
 
-	bool is_dir  = Common::File::IsDirectoryExisting(real_file_name);
-	bool is_file = Common::File::IsFileExisting(real_file_name);
-
-	if (is_dir) {
-		return KERNEL_ERROR_EPERM;
+	const auto info = Common::File::GetInfo(real_file_name);
+	if (!info) {
+		return KERNEL_ERROR_ENOENT;
 	}
 
-	if (!is_file) {
-		return KERNEL_ERROR_ENOENT;
+	if (!info->is_file) {
+		return KERNEL_ERROR_EPERM;
 	}
 
 	auto* open_file = g_files->GetFile(real_file_name);
@@ -1558,19 +1635,11 @@ int KYTY_SYSV_ABI KernelMkdir(const char* path, uint16_t mode) {
 		return KERNEL_ERROR_EROFS;
 	}
 
-	if (Common::File::IsDirectoryExisting(real_name)) {
+	if (Common::File::GetInfo(real_name)) {
 		return KERNEL_ERROR_EEXIST;
 	}
 
-	if (!Common::File::CreateDirectory(real_name)) {
-		return KERNEL_ERROR_EIO;
-	}
-
-	if (!Common::File::IsDirectoryExisting(real_name)) {
-		return KERNEL_ERROR_ENOENT;
-	}
-
-	return OK;
+	return Common::File::CreateDirectory(real_name) ? OK : KERNEL_ERROR_EIO;
 }
 
 int KYTY_SYSV_ABI KernelRmdir(const char* path) {
@@ -1619,11 +1688,7 @@ int KYTY_SYSV_ABI KernelCheckReachability(const char* path) {
 
 	auto real_name = g_mount_points->ResolvePath(mounted_path);
 
-	if (Common::File::IsFileExisting(real_name) || Common::File::IsDirectoryExisting(real_name)) {
-		return OK;
-	}
-
-	return KERNEL_ERROR_ENOENT;
+	return Common::File::GetInfo(real_name) ? OK : KERNEL_ERROR_ENOENT;
 }
 
 } // namespace Libs::LibKernel::FileSystem

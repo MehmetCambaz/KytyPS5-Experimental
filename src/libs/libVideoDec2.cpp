@@ -4,7 +4,6 @@
 #include "libs/videoDec2Decoder.h"
 #include "loader/symbolDatabase.h"
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -41,6 +40,8 @@ constexpr int32_t VIDEODEC2_ERROR_ACCESS_UNIT          = -2128805119; // 0x811d0
 constexpr int32_t VIDEODEC2_ERROR_OVERSIZE_DECODE      = -2128805118; // 0x811d0302
 
 constexpr uint32_t VIDEODEC2_RESOURCE_TYPE_COMPUTE = 1;
+constexpr uint32_t VIDEODEC2_CODEC_TYPE_AVC        = 1;
+constexpr uint32_t VIDEODEC2_CODEC_TYPE_VP9        = 2382845;
 constexpr size_t   VIDEODEC2_MIN_MEMORY_SIZE       = 16ull * 1024ull * 1024ull;
 constexpr uint32_t VIDEODEC2_FRAME_FORMAT_DEFAULT  = 0;
 
@@ -113,6 +114,7 @@ struct Videodec2FrameBuffer {
 };
 
 using Videodec2AvcPictureInfo = Decoder::AvcPictureInfo;
+using Videodec2Vp9PictureInfo = Decoder::Vp9PictureInfo;
 
 struct Videodec2ComputeMemoryInfo {
 	size_t this_size;
@@ -201,7 +203,7 @@ static void ApplyDecodedOutput(const Decoder::Output& decoded, Videodec2FrameBuf
 	output_info->frame_buffer_size = decoded.buffer_size;
 	if (output_info->this_size == sizeof(Videodec2OutputInfo)) {
 		output_info->frame_format         = VIDEODEC2_FRAME_FORMAT_DEFAULT;
-		output_info->frame_pitch_in_bytes = decoded.pitch_in_bytes;
+		output_info->frame_pitch_in_bytes = decoded.pitch;
 	}
 }
 
@@ -302,17 +304,15 @@ static int32_t KYTY_SYSV_ABI ReleaseComputeQueue(Videodec2ComputeQueue compute_q
 	return compute_queue != nullptr ? OK : VIDEODEC2_ERROR_COMPUTE_QUEUE_ID;
 }
 
-// The largest frame this decoder hands out: rows aligned to 256 samples, the luma plane and the
-// interleaved chroma after it, two bytes per sample in a 10-bit profile (P010). Without a maximum
-// size in the configuration, the largest picture Videodec2 decodes (4096x2160).
-static size_t MaxFrameBufferSize(const Videodec2DecoderConfigInfo* config) {
-	const auto width =
-	    static_cast<size_t>(config->max_frame_width > 0 ? config->max_frame_width : 4096);
-	const auto height =
-	    static_cast<size_t>(config->max_frame_height > 0 ? config->max_frame_height : 2160);
-	const auto sample = Decoder::HighBitDepthProfile(config->codec_type, config->profile) ? 2u : 1u;
-	const auto pitch  = ((width + 255u) & ~size_t {255}) * sample;
-	return std::max(VIDEODEC2_MIN_MEMORY_SIZE, pitch * (height + (height + 1u) / 2u));
+static size_t FrameBufferSize(const Videodec2DecoderConfigInfo& config) {
+	if (config.codec_type != VIDEODEC2_CODEC_TYPE_AVC || config.max_frame_width <= 0 ||
+	    config.max_frame_height <= 0) {
+		return VIDEODEC2_MIN_MEMORY_SIZE;
+	}
+	// AVC output: 256-byte pitch, 16-line maximum height, and 4096 bytes of metadata.
+	const auto pitch  = (static_cast<size_t>(config.max_frame_width) + 255u) & ~size_t {255};
+	const auto height = (static_cast<size_t>(config.max_frame_height) + 15u) & ~size_t {15};
+	return pitch * height * 3 / 2 + 4096;
 }
 
 static int32_t KYTY_SYSV_ABI QueryDecoderMemoryInfo(const Videodec2DecoderConfigInfo* config,
@@ -339,7 +339,7 @@ static int32_t KYTY_SYSV_ABI QueryDecoderMemoryInfo(const Videodec2DecoderConfig
 	memory_info->gpu_memory             = nullptr;
 	memory_info->cpu_gpu_memory_size    = VIDEODEC2_MIN_MEMORY_SIZE;
 	memory_info->cpu_gpu_memory         = nullptr;
-	memory_info->max_frame_buffer_size  = MaxFrameBufferSize(config);
+	memory_info->max_frame_buffer_size  = FrameBufferSize(*config);
 	memory_info->frame_buffer_alignment = 0x100;
 	memory_info->reserved0              = 0;
 
@@ -368,7 +368,7 @@ static int32_t KYTY_SYSV_ABI CreateDecoder(const Videodec2DecoderConfigInfo* con
 	if (memory_info->cpu_memory_size < VIDEODEC2_MIN_MEMORY_SIZE ||
 	    memory_info->gpu_memory_size < VIDEODEC2_MIN_MEMORY_SIZE ||
 	    memory_info->cpu_gpu_memory_size < VIDEODEC2_MIN_MEMORY_SIZE ||
-	    memory_info->max_frame_buffer_size < VIDEODEC2_MIN_MEMORY_SIZE) {
+	    memory_info->max_frame_buffer_size < FrameBufferSize(*config)) {
 		return VIDEODEC2_ERROR_MEMORY_SIZE;
 	}
 
@@ -378,8 +378,7 @@ static int32_t KYTY_SYSV_ABI CreateDecoder(const Videodec2DecoderConfigInfo* con
 	}
 
 	auto* state =
-	    Decoder::Create({config->codec_type, config->max_frame_width, config->max_frame_height, 2u,
-	                     Decoder::HighBitDepthProfile(config->codec_type, config->profile)});
+	    Decoder::Create({config->codec_type, config->max_frame_width, config->max_frame_height});
 	if (state == nullptr) {
 		return VIDEODEC2_ERROR_API_FAIL;
 	}
@@ -547,7 +546,7 @@ static int32_t KYTY_SYSV_ABI GetPictureInfo(const Videodec2OutputInfo* output_in
 		return OK;
 	};
 
-	if (output_info->codec_type == 1) {
+	if (output_info->codec_type == VIDEODEC2_CODEC_TYPE_AVC) {
 		const auto requested_size = *static_cast<const size_t*>(first_picture_info);
 		if (requested_size != sizeof(Videodec2AvcPictureInfo) &&
 		    (requested_size | 16u) != sizeof(Videodec2AvcPictureInfo)) {
@@ -556,6 +555,12 @@ static int32_t KYTY_SYSV_ABI GetPictureInfo(const Videodec2OutputInfo* output_in
 
 		const auto picture = Decoder::MakeAvcPictureInfo(decoded, requested_size);
 		std::memcpy(first_picture_info, &picture, requested_size);
+	} else if (output_info->codec_type == VIDEODEC2_CODEC_TYPE_VP9) {
+		auto* picture = static_cast<Videodec2Vp9PictureInfo*>(first_picture_info);
+		if (picture->this_size != sizeof(Videodec2Vp9PictureInfo)) {
+			return VIDEODEC2_ERROR_STRUCT_SIZE;
+		}
+		*picture = Decoder::MakeVp9PictureInfo(decoded);
 	} else {
 		const auto result = fill_common(first_picture_info, true);
 		if (result != OK) {
@@ -573,7 +578,7 @@ static int32_t KYTY_SYSV_ABI GetPictureInfo(const Videodec2OutputInfo* output_in
 }
 
 LIB_DEFINE(InitVideoDec2_1) {
-	PRINT_NAME_ENABLE_ALL(true);
+	PRINT_NAME_ENABLE(true);
 
 	LIB_FUNC("RnDibcGCPKw", QueryComputeMemoryInfo);
 	LIB_FUNC("eD+X2SmxUt4", AllocateComputeQueue);

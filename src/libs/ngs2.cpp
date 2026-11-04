@@ -537,22 +537,25 @@ struct Ngs2SamplerFilter {
 struct Ngs2ReverbState {
 	static constexpr size_t COMBS = 6;
 	struct Params {
-		float   wet               = 0.0f;
-		float   dry               = 0.0f;
-		int32_t room              = 0;
-		int32_t reflections       = -10000;
-		int32_t reverb            = -10000;
-		float   decay_time        = 1.0f;
-		float   hf_ratio          = 1.0f;
-		float   reflections_delay = 0.0f;
-		float   reverb_delay      = 0.0f;
+		float    wet               = 1.0f;
+		float    dry               = 0.0f;
+		int32_t  room              = -10000;
+		int32_t  reflections       = -10000;
+		int32_t  reverb            = -10000;
+		float    decay_time        = 1.0f;
+		float    hf_ratio          = 0.5f;
+		float    reflections_delay = 0.02f;
+		float    reverb_delay      = 0.04f;
+		int32_t  room_hf           = 0;
+		float    hf_reference      = 5000.0f;
+		uint32_t channel_mask      = 0x8;
 	};
 	struct Comb {
 		std::vector<float> buffer;
-		size_t             pos      = 0;
-		float              feedback = 0.0f;
-		float              damping  = 0.0f;
-		float              lowpass  = 0.0f;
+		size_t             pos         = 0;
+		float              feedback    = 0.0f;
+		double             lowpass_mix = 1.0;
+		double             lowpass     = 0.0;
 	};
 	struct Allpass {
 		std::vector<float> buffer;
@@ -563,17 +566,34 @@ struct Ngs2ReverbState {
 		size_t                  pos = 0;
 		std::array<Comb, COMBS> combs;
 		std::array<Allpass, 2>  allpasses;
+		double                  room_lowpass = 0.0;
+
+		void Clear() {
+			std::ranges::fill(ring, 0.0f);
+			pos          = 0;
+			room_lowpass = 0.0;
+			for (auto& comb: combs) {
+				std::ranges::fill(comb.buffer, 0.0f);
+				comb.pos     = 0;
+				comb.lowpass = 0.0;
+			}
+			for (auto& allpass: allpasses) {
+				std::ranges::fill(allpass.buffer, 0.0f);
+				allpass.pos = 0;
+			}
+		}
 	};
 
 	Params               params;
 	std::vector<Channel> channels;
-	uint32_t             rate          = 0;
-	size_t               reflect_tap   = 0;
-	size_t               late_tap      = 0;
-	float                reflect_gain  = 0.0f;
-	float                late_gain     = 0.0f;
-	bool                 active        = false;
-	size_t               quiet_samples = 0;
+	uint32_t             rate            = 0;
+	size_t               reflect_tap     = 0;
+	size_t               late_tap        = 0;
+	float                reflect_gain    = 0.0f;
+	float                late_gain       = 0.0f;
+	double               room_filter_mix = 1.0;
+	bool                 active          = false;
+	size_t               quiet_samples   = 0;
 
 	static float MillibelsToGain(int32_t millibels) {
 		if (millibels <= -10000) {
@@ -588,8 +608,9 @@ struct Ngs2ReverbState {
 
 	void Reset() {
 		channels.clear();
-		rate   = 0;
-		active = false;
+		rate          = 0;
+		active        = false;
+		quiet_samples = 0;
 	}
 
 	void Prepare(uint32_t num_channels, uint32_t sample_rate) {
@@ -600,8 +621,9 @@ struct Ngs2ReverbState {
 		                                                        43.7f, 47.3f, 53.1f};
 		static constexpr std::array<float, 2>     allpass_ms = {5.0f, 1.7f};
 		channels.assign(num_channels, Channel {});
-		rate   = sample_rate;
-		active = false;
+		rate          = sample_rate;
+		active        = false;
+		quiet_samples = 0;
 		for (size_t c = 0; c < channels.size(); ++c) {
 			auto& channel = channels[c];
 			channel.ring.assign(Samples(500.0f, rate), 0.0f);
@@ -619,21 +641,42 @@ struct Ngs2ReverbState {
 
 	void Apply() {
 		const float decay = std::clamp(params.decay_time, 0.1f, 20.0f);
-		const float ratio = std::clamp(params.hf_ratio, 0.1f, 2.0f);
-		for (auto& channel: channels) {
+		const float ratio = std::clamp(params.hf_ratio, 0.01f, 2.0f);
+		for (size_t c = 0; c < channels.size(); ++c) {
+			auto& channel = channels[c];
+			if (c < 32 && (params.channel_mask & (uint32_t {1} << c)) != 0) {
+				channel.Clear();
+			}
 			for (auto& comb: channel.combs) {
-				const float seconds = float(comb.buffer.size()) / float(rate);
-				const float mid     = std::pow(10.0f, -3.0f * seconds / decay);
-				const float high =
-				    std::min(std::pow(10.0f, -3.0f * seconds / (decay * ratio)), 0.999f);
+				const float  seconds = float(comb.buffer.size()) / float(rate);
+				const float  mid     = std::pow(10.0f, -3.0f * seconds / decay);
+				const double high =
+				    std::min(std::pow(10.0, -3.0 * seconds / (decay * ratio)), 0.999);
 				comb.feedback = mid;
-				// One-pole damping whose Nyquist gain matches the high-frequency decay.
-				comb.damping = (mid - high) / (mid + high);
+				// Store the complement directly to retain very small HF decay ratios.
+				comb.lowpass_mix = 2.0 * high / (mid + high);
 			}
 		}
+		// Unity-DC one-pole low pass with the requested attenuation at HFReference.
+		// Compute its input coefficient directly in double precision, including -100 dB.
+		const double gain = std::pow(10.0, std::clamp(params.room_hf, -10000, 0) / 2000.0);
+		room_filter_mix   = 1.0;
+		if (gain < 1.0 && rate != 0) {
+			const double frequency =
+			    std::min<double>(std::clamp(params.hf_reference, 20.0f, 20000.0f), rate * 0.5);
+			const double k  = 1.0 - std::cos(2.0 * std::numbers::pi * frequency / rate);
+			const double g2 = gain * gain;
+			const double a  = g2 * k;
+			room_filter_mix = 2.0 * a / (std::sqrt(a * a + 2.0 * a * (1.0 - g2)) + a);
+		}
 		const size_t max_tap = channels.empty() ? 0 : channels[0].ring.size() - 1;
-		reflect_tap          = std::min(Samples(params.reflections_delay * 1000.0f, rate), max_tap);
-		late_tap = std::min(reflect_tap + Samples(params.reverb_delay * 1000.0f, rate), max_tap);
+		reflect_tap  = params.reflections_delay == 0.0f
+		                   ? 0
+		                   : std::min(Samples(params.reflections_delay * 1000.0f, rate), max_tap);
+		late_tap     = std::min(reflect_tap + (params.reverb_delay == 0.0f
+		                                           ? 0
+		                                           : Samples(params.reverb_delay * 1000.0f, rate)),
+		                        max_tap);
 		reflect_gain = MillibelsToGain(params.room + params.reflections);
 		late_gain    = MillibelsToGain(params.room + params.reverb);
 	}
@@ -645,8 +688,15 @@ struct Ngs2ReverbState {
 		}
 		float peak = 0.0f;
 		for (size_t c = 0; c < channels.size(); ++c) {
-			auto&        channel   = channels[c];
-			auto*        data      = samples.data() + c * grain;
+			auto& channel = channels[c];
+			auto* data    = samples.data() + c * grain;
+			if (c < 32 && (params.channel_mask & (uint32_t {1} << c)) != 0) {
+				for (uint32_t i = 0; i < grain; ++i) {
+					data[i] *= params.dry;
+					peak = std::max(peak, std::abs(data[i]));
+				}
+				continue;
+			}
 			const size_t ring_size = channel.ring.size();
 			for (uint32_t i = 0; i < grain; ++i) {
 				const float input         = data[i];
@@ -660,7 +710,7 @@ struct Ngs2ReverbState {
 				float tail = 0.0f;
 				for (auto& comb: channel.combs) {
 					const float out = comb.buffer[comb.pos];
-					comb.lowpass    = (1.0f - comb.damping) * out + comb.damping * comb.lowpass;
+					comb.lowpass += comb.lowpass_mix * (out - comb.lowpass);
 					comb.buffer[comb.pos] = late_input + comb.feedback * comb.lowpass;
 					comb.pos              = (comb.pos + 1) % comb.buffer.size();
 					tail += out;
@@ -674,8 +724,10 @@ struct Ngs2ReverbState {
 					allpass.pos                 = (allpass.pos + 1) % allpass.buffer.size();
 				}
 				const float wet = reflection * reflect_gain + tail * late_gain;
-				data[i]         = input * params.dry + wet * params.wet;
-				peak            = std::max(peak, std::abs(data[i]));
+				channel.room_lowpass += room_filter_mix * (wet - channel.room_lowpass);
+				data[i] =
+				    input * params.dry + static_cast<float>(channel.room_lowpass) * params.wet;
+				peak = std::max(peak, std::abs(data[i]));
 			}
 		}
 		if (has_input || peak >= 1e-6f) {
@@ -689,14 +741,7 @@ struct Ngs2ReverbState {
 		if (quiet_samples > channels[0].ring.size() + Samples(100.0f, rate)) {
 			active = false;
 			for (auto& channel: channels) {
-				std::ranges::fill(channel.ring, 0.0f);
-				for (auto& comb: channel.combs) {
-					std::ranges::fill(comb.buffer, 0.0f);
-					comb.lowpass = 0.0f;
-				}
-				for (auto& allpass: channel.allpasses) {
-					std::ranges::fill(allpass.buffer, 0.0f);
-				}
+				channel.Clear();
 			}
 		}
 		return active;
@@ -960,10 +1005,14 @@ struct Ngs2VoiceInternal {
 			case 2:
 				if (state == Ngs2VoicePlayState::Playing || state == Ngs2VoicePlayState::Paused) {
 					state = Ngs2VoicePlayState::Stopped;
+					reverb.Reset();
 				}
 				break;
 			case 4:
-			case 8: state = Ngs2VoicePlayState::Empty; break;
+			case 8:
+				state = Ngs2VoicePlayState::Empty;
+				reverb.Reset();
+				break;
 			case 16:
 				if (state == Ngs2VoicePlayState::Playing) {
 					state = Ngs2VoicePlayState::Paused;
@@ -2411,33 +2460,37 @@ int KYTY_SYSV_ABI Ngs2CalcWaveformBlock(const Ngs2WaveformFormat* format, uint32
 	return OK;
 }
 
-// Stereo pan: 0 is front, the left speaker sits at 270 and the right at 90 (in degrees). The
-// source is panned with a constant-power law along the arc between the speakers; `distance`
-// (-1..1) blends in the opposite direction.
-static void PanStereoGains(const Ngs2PanParam& param, float unit_angle, float* left, float* right) {
-	constexpr float pi = 3.14159265358979f;
+// Interpolate along either arc between the stereo speakers. The optional positions use the
+// same angle units as the source; geometry uses the default L=270, R=90 degree placement.
+static void PanStereoGains(const Ngs2PanParam& param, float unit_angle, float* left, float* right,
+                           const float* speaker_angles = nullptr) {
+	constexpr float pi = std::numbers::pi_v<float>;
+	// Preserve distinct float speaker positions when converting them to turns.
+	const auto wrap = [](double turns) {
+		const double value = std::fmod(turns, 1.0);
+		return value < 0.0f ? value + 1.0f : value;
+	};
+	const auto turns = [unit_angle](float angle) {
+		return std::remainder(double(angle), double(unit_angle)) / double(unit_angle);
+	};
+	const double left_angle  = speaker_angles == nullptr ? 0.75 : turns(speaker_angles[0]);
+	const double right_angle = speaker_angles == nullptr ? 0.25 : turns(speaker_angles[1]);
+	const double span        = wrap(right_angle - left_angle);
 
-	const float unit  = (unit_angle > 0.0f ? unit_angle : 360.0f);
-	float       angle = std::fmod(param.angle / unit * 360.0f, 360.0f);
-	if (angle < 0.0f) {
-		angle += 360.0f;
-	}
-
-	auto pan = [pi](float deg, float weight, float* l, float* r) {
-		// t runs 0 (left speaker) .. 1 (right speaker); front and rear halves mirror each other.
-		const float t = (deg > 90.0f && deg < 270.0f) ? (270.0f - deg) / 180.0f
-		                                              : std::fmod(deg + 90.0f, 360.0f) / 180.0f;
-		*l += std::cos(t * pi * 0.5f) * weight;
-		*r += std::sin(t * pi * 0.5f) * weight;
+	auto pan = [&](double angle, float weight, float* l, float* r) {
+		const double offset = wrap(angle - left_angle);
+		const double t      = offset <= span ? offset / span : (1.0f - offset) / (1.0f - span);
+		*l += static_cast<float>(std::max(0.0, std::cos(t * pi * 0.5)) * weight);
+		*r += static_cast<float>(std::sin(t * pi * 0.5) * weight);
 	};
 
-	const float distance = std::clamp(param.distance, -1.0f, 1.0f);
-	const float toward   = std::sin((distance + 1.0f) * 0.25f * pi);
-	const float opposite = std::sin((1.0f - distance) * 0.25f * pi);
-
-	float l = 0.0f, r = 0.0f;
+	const float  distance = std::clamp(param.distance, -1.0f, 1.0f);
+	const float  toward   = std::sin((distance + 1.0f) * 0.25f * pi);
+	const float  opposite = std::sin((1.0f - distance) * 0.25f * pi);
+	const double angle    = turns(param.angle);
+	float        l = 0.0f, r = 0.0f;
 	pan(angle, toward, &l, &r);
-	pan(std::fmod(angle + 180.0f, 360.0f), opposite, &l, &r);
+	pan(wrap(angle + 0.5f), opposite, &l, &r);
 	*left  = l * param.fbw_level;
 	*right = r * param.fbw_level;
 }
@@ -2448,16 +2501,44 @@ int KYTY_SYSV_ABI Ngs2PanInit(Ngs2PanWork* work, const float* speaker_angles, fl
 	LOGF("\t work = 0x%016" PRIx64 ", num_speakers = %" PRIu32 "\n",
 	     reinterpret_cast<uint64_t>(work), num_speakers);
 
-	EXIT_NOT_IMPLEMENTED(work == nullptr);
-
-	std::memset(work, 0, sizeof(Ngs2PanWork));
-	work->unit_angle   = unit_angle;
-	work->num_speakers = std::min<uint32_t>(num_speakers, 8);
-	if (speaker_angles != nullptr) {
-		for (uint32_t i = 0; i < work->num_speakers; i++) {
-			work->speaker_angles[i] = speaker_angles[i];
+	if (work == nullptr) {
+		return NGS2_ERROR_INVALID_OUT_ADDRESS;
+	}
+	if (unit_angle != 360.0f && unit_angle != 2.0f * std::numbers::pi_v<float>) {
+		return static_cast<int32_t>(0x804a8450u); // Invalid pan angle unit.
+	}
+	static constexpr float stereo[]        = {270.0f, 90.0f};
+	static constexpr float quad[]          = {320.0f, 40.0f, 250.0f, 110.0f};
+	static constexpr float surround[]      = {320.0f, 40.0f, 0.0f, 250.0f, 110.0f};
+	static constexpr float surround_back[] = {320.0f, 40.0f, 0.0f, 250.0f, 110.0f, 210.0f, 150.0f};
+	const float*           defaults        = nullptr;
+	switch (num_speakers) {
+		case 2: defaults = stereo; break;
+		case 4: defaults = quad; break;
+		case 5: defaults = surround; break;
+		case 7: defaults = surround_back; break;
+		default: return static_cast<int32_t>(0x804a8451u); // Invalid pan speaker.
+	}
+	Ngs2PanWork result {};
+	result.unit_angle   = unit_angle;
+	result.num_speakers = num_speakers;
+	for (uint32_t i = 0; i < num_speakers; i++) {
+		const float angle =
+		    speaker_angles == nullptr ? defaults[i] / 360.0f * unit_angle : speaker_angles[i];
+		if (!std::isfinite(angle)) {
+			return static_cast<int32_t>(0x804a8451u);
+		}
+		result.speaker_angles[i] = angle;
+		for (uint32_t j = 0; j < i; j++) {
+			const double difference =
+			    std::remainder(double(angle), double(unit_angle)) -
+			    std::remainder(double(result.speaker_angles[j]), double(unit_angle));
+			if (std::remainder(difference, double(unit_angle)) == 0.0) {
+				return static_cast<int32_t>(0x804a8451u);
+			}
 		}
 	}
+	*work = result;
 	return OK;
 }
 
@@ -2475,7 +2556,7 @@ int KYTY_SYSV_ABI Ngs2PanGetVolumeMatrix(Ngs2PanWork* work, const Ngs2PanParam* 
 	if (work != nullptr && work->num_speakers == 2 && matrix_format == 2 && params != nullptr) {
 		for (uint32_t p = 0; p < num_params; p++) {
 			float left = 0.0f, right = 0.0f;
-			PanStereoGains(params[p], work->unit_angle, &left, &right);
+			PanStereoGains(params[p], work->unit_angle, &left, &right, work->speaker_angles);
 			out_volume_matrix[0 * num_params + p] = left;
 			out_volume_matrix[1 * num_params + p] = right;
 		}
@@ -2491,8 +2572,6 @@ int KYTY_SYSV_ABI Ngs2PanGetVolumeMatrix(Ngs2PanWork* work, const Ngs2PanParam* 
 
 	return OK;
 }
-
-static constexpr float PI = 3.14159265358979f;
 
 static Ngs2GeomVector GeomSub(const Ngs2GeomVector& a, const Ngs2GeomVector& b) {
 	return {a.x - b.x, a.y - b.y, a.z - b.z};
@@ -2525,9 +2604,9 @@ int KYTY_SYSV_ABI Ngs2GeomResetListenerParam(Ngs2GeomListenerParam* out_listener
 	EXIT_NOT_IMPLEMENTED(out_listener_param == nullptr);
 
 	std::memset(out_listener_param, 0, sizeof(Ngs2GeomListenerParam));
-	out_listener_param->orient_front.z = 1.0f;
+	out_listener_param->orient_front.z = -1.0f;
 	out_listener_param->orient_up.y    = 1.0f;
-	out_listener_param->sound_speed    = 343.0f;
+	out_listener_param->sound_speed    = 340.29f;
 
 	return OK;
 }
@@ -2569,10 +2648,10 @@ int KYTY_SYSV_ABI Ngs2GeomCalcListener(const Ngs2GeomListenerParam* param,
 	std::memset(out_work, 0, sizeof(Ngs2GeomListenerWork));
 
 	// The work area is private to this implementation: the rows hold the listener's right, up and
-	// front axes followed by its position. Flag bit 0 selects right-handed coordinates.
-	const bool right_handed = (flags & 0x1u) != 0;
-	auto       front        = GeomNormalize(param->orient_front, {0.0f, 0.0f, 1.0f});
-	auto       right =
+	// front axes followed by its position. Flag bit 0 selects left-handed coordinates.
+	const bool right_handed = (flags & 0x1u) == 0;
+	auto front = GeomNormalize(param->orient_front, {0.0f, 0.0f, right_handed ? -1.0f : 1.0f});
+	auto right =
 	    right_handed ? GeomCross(front, param->orient_up) : GeomCross(param->orient_up, front);
 	right                        = GeomNormalize(right, {1.0f, 0.0f, 0.0f});
 	const auto           up      = right_handed ? GeomCross(right, front) : GeomCross(front, right);
@@ -2583,7 +2662,7 @@ int KYTY_SYSV_ABI Ngs2GeomCalcListener(const Ngs2GeomListenerParam* param,
 		out_work->matrix[i][2] = rows[i].z;
 	}
 	out_work->velocity    = param->velocity;
-	out_work->sound_speed = (param->sound_speed > 0.0f ? param->sound_speed : 343.0f);
+	out_work->sound_speed = (param->sound_speed > 0.0f ? param->sound_speed : 340.29f);
 	out_work->coordinate  = flags & 0x1u;
 
 	return OK;
@@ -2600,8 +2679,7 @@ int KYTY_SYSV_ABI Ngs2GeomApply(const Ngs2GeomListenerWork* listener,
 	EXIT_NOT_IMPLEMENTED(out_attrib == nullptr);
 
 	std::memset(out_attrib, 0, sizeof(Ngs2GeomAttribute));
-	out_attrib->pitch_ratio         = 1.0f;
-	out_attrib->a3d_attrib.position = source->position;
+	out_attrib->pitch_ratio = 1.0f;
 
 	const Ngs2GeomVector listener_pos {listener->matrix[3][0], listener->matrix[3][1],
 	                                   listener->matrix[3][2]};
@@ -2613,85 +2691,100 @@ int KYTY_SYSV_ABI Ngs2GeomApply(const Ngs2GeomListenerWork* listener,
 	const auto  offset   = GeomSub(source->position, listener_pos);
 	const float distance = GeomLength(offset);
 
-	// Distance attenuation between the reference and maximum distances.
-	const float reference = std::max(source->rolloff.reference_distance, 1e-6f);
-	const float max_dist  = std::max(source->rolloff.max_distance, reference);
-	const float clamped   = std::clamp(distance, reference, max_dist);
-	const float factor    = source->rolloff.rolloff_factor;
-	float       gain      = 1.0f;
+	// Models 3..5 clamp distance; models 0..2 continue attenuating beyond max_distance.
+	const float reference     = std::max(source->rolloff.reference_distance, 1e-6f);
+	const float max_dist      = std::max(source->rolloff.max_distance, reference);
+	const bool  clamped_model = source->rolloff.model >= 3 && source->rolloff.model <= 5;
+	const float rolloff_distance =
+	    clamped_model ? std::clamp(distance, reference, max_dist) : distance;
+	const float factor = source->rolloff.rolloff_factor;
+	float       gain   = 1.0f;
 	switch (source->rolloff.model) {
 		case 1:
+		case 4:
 			gain = (max_dist > reference)
-			           ? 1.0f - factor * (clamped - reference) / (max_dist - reference)
+			           ? 1.0f - factor * (rolloff_distance - reference) / (max_dist - reference)
 			           : 1.0f;
 			break;
-		case 2: gain = std::pow(clamped / reference, -factor); break;
-		default: gain = reference / (reference + factor * (clamped - reference)); break;
+		case 2:
+		case 5: gain = std::pow(rolloff_distance / reference, -factor); break;
+		default: gain = reference / (reference + factor * (rolloff_distance - reference)); break;
 	}
-	gain = std::clamp(gain, 0.0f, 1.0f);
+	gain = std::max(gain, 0.0f);
 
-	// Cone: the level moves from the inner to the outer level with the angle off the axis.
-	if (distance > 0.0f && source->cone.outer_angle < 360.0f) {
-		const auto  axis      = GeomNormalize(source->direction, {0.0f, 0.0f, 1.0f});
-		const auto  to_listen = GeomScale(offset, -1.0f / distance);
-		const float angle =
-		    std::acos(std::clamp(GeomDot(axis, to_listen), -1.0f, 1.0f)) * (180.0f / PI) * 2.0f;
-		float cone = 1.0f;
+	// CALC_SOURCE_ANGLE opts into source cone directionality, including 360-degree outer cones.
+	if ((flags & 0x1u) != 0 && distance > 0.0f && GeomLength(source->direction) > 1e-6f) {
+		const auto  axis        = GeomNormalize(source->direction, {0.0f, 0.0f, 1.0f});
+		const auto  to_listen   = GeomScale(offset, -1.0f / distance);
+		const float angle       = std::acos(std::clamp(GeomDot(axis, to_listen), -1.0f, 1.0f)) *
+		                          (180.0f / std::numbers::pi_v<float>) * 2.0f;
+		const float inner_level = std::clamp(source->cone.inner_level, 0.0f, 2.0f);
+		const float outer_level = std::clamp(source->cone.outer_level, 0.0f, 2.0f);
+		float       cone        = 1.0f;
 		if (angle <= source->cone.inner_angle) {
-			cone = source->cone.inner_level;
+			cone = inner_level;
 		} else if (angle >= source->cone.outer_angle) {
-			cone = source->cone.outer_level;
+			cone = outer_level;
 		} else {
 			const float t = (angle - source->cone.inner_angle) /
 			                (source->cone.outer_angle - source->cone.inner_angle);
-			cone          = source->cone.inner_level +
-			                t * (source->cone.outer_level - source->cone.inner_level);
+			cone          = inner_level + t * (outer_level - inner_level);
 		}
-		gain *= cone;
+		gain = cone == 0.0f ? 0.0f : gain * cone;
 	}
 
+	// Bound the gain after cone amplification, before scaling, so a muted colocated source
+	// remains finite even when an unclamped rolloff has an infinite gain at distance zero.
+	gain              = std::clamp(gain, 0.0f, 1.0f);
 	const float level = source->min_level + (source->max_level - source->min_level) * gain;
-	out_attrib->a3d_attrib.volume = level;
+	if ((flags & 0x8u) != 0) { // CALC_A3D_ATTRIBUTE
+		out_attrib->a3d_attrib.position = source->position;
+		out_attrib->a3d_attrib.volume   = level;
+	}
 
-	// Doppler shift from the speed of both ends along the line between them.
-	if (distance > 0.0f && source->doppler_factor > 0.0f) {
+	// CALC_SOURCE_DOPLLER opts into the velocity-dependent pitch shift.
+	if ((flags & 0x2u) != 0 && distance > 0.0f && source->doppler_factor > 0.0f) {
 		const float sound = std::max(listener->sound_speed, 1.0f);
 		// Source-to-listener direction, as in the DS3D/OpenAL Doppler model.
-		const auto  axis  = GeomScale(offset, -1.0f / distance);
+		const auto  axis      = GeomScale(offset, -1.0f / distance);
+		const float max_speed = sound * (1.0f - 1e-6f);
 		const float vl =
-		    std::min(GeomDot(listener->velocity, axis), sound / source->doppler_factor - 1.0f);
+		    std::min(source->doppler_factor * GeomDot(listener->velocity, axis), max_speed);
 		const float vs =
-		    std::min(GeomDot(source->velocity, axis), sound / source->doppler_factor - 1.0f);
-		out_attrib->pitch_ratio =
-		    (sound - source->doppler_factor * vl) / (sound - source->doppler_factor * vs);
+		    std::min(source->doppler_factor * GeomDot(source->velocity, axis), max_speed);
+		out_attrib->pitch_ratio = std::clamp((sound - vl) / (sound - vs), 0.0f, 4.0f);
+	}
+
+	if ((flags & 0x4u) == 0) { // CALC_VOLUME_MATRIX
+		return OK;
 	}
 
 	// Azimuth of the source from the listener's front, positive to the right.
 	float angle  = 0.0f;
 	float spread = 0.0f;
 	if (distance > source->radius && distance > 1e-6f) {
-		angle = std::atan2(GeomDot(offset, right), GeomDot(offset, front)) * (180.0f / PI);
+		angle = std::atan2(GeomDot(offset, right), GeomDot(offset, front)) *
+		        (180.0f / std::numbers::pi_v<float>);
 	} else {
 		spread = 1.0f; // At the listener or inside the source's radius: no direction.
 	}
 
-	const uint32_t inputs =
+	// Geometry returns a single input row with matrix_format output channels.
+	const uint32_t outputs =
 	    (source->matrix_format == 0 ? 2u : std::min<uint32_t>(source->matrix_format, 8));
-	if (source->num_speakers == 2 || source->num_speakers == 0) {
+	if (outputs == 1) {
+		out_attrib->level[0] = source->fbw_level * level;
+	} else if (source->num_speakers == 2 || source->num_speakers == 0) {
 		float        left = 0.0f, right_gain = 0.0f;
 		Ngs2PanParam pan {angle, 1.0f, source->fbw_level, source->lfe_level};
 		PanStereoGains(pan, 360.0f, &left, &right_gain);
 		if (spread > 0.0f) {
 			left = right_gain = source->fbw_level * std::numbers::sqrt2_v<float> / 2;
 		}
-		// Every input is placed at the source position. Games commonly declare two channels and
-		// use only the first row as a mono pan, so an identity matrix would force that voice left.
-		for (uint32_t ch = 0; ch < inputs; ch++) {
-			out_attrib->level[ch * 8 + 0] = left * level;
-			out_attrib->level[ch * 8 + 1] = right_gain * level;
-		}
+		out_attrib->level[0] = left * level;
+		out_attrib->level[1] = right_gain * level;
 	} else {
-		for (uint32_t ch = 0; ch < inputs; ch++) {
+		for (uint32_t ch = 0; ch < outputs; ch++) {
 			out_attrib->level[ch * 8 + ch] = level;
 		}
 	}
@@ -2863,22 +2956,26 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 						// Input and output channels, flags; channel conversion stays silent.
 						EXIT_NOT_IMPLEMENTED(values[0] == 0 || values[2] != 0);
 						voice->ResetSetupState();
-						voice->reverb.Reset();
-						voice->channels = values[1] == values[0] ? values[0] : 0;
+						voice->reverb.params = {};
+						voice->channels      = values[1] == values[0] ? values[0] : 0;
 						break;
 					case 1: {
 						// The reverb parameters start with the wet and dry levels.
 						const auto* levels = reinterpret_cast<const float*>(values);
-						auto&       params       = voice->reverb.params;
-						params.wet               = std::clamp(levels[0], 0.0f, 1.0f);
-						params.dry               = std::clamp(levels[1], 0.0f, 1.0f);
-						params.room              = static_cast<int32_t>(values[2]);
-						params.decay_time        = levels[5];
-						params.hf_ratio          = levels[6];
-						params.reflections       = static_cast<int32_t>(values[7]);
+						auto&       params = voice->reverb.params;
+						params.wet         = std::clamp(levels[0], 0.0f, 32.0f);
+						params.dry         = std::clamp(levels[1], 0.0f, 32.0f);
+						params.room        = std::clamp(static_cast<int32_t>(values[2]), -10000, 0);
+						params.room_hf     = std::clamp(static_cast<int32_t>(values[3]), -10000, 0);
+						params.decay_time  = std::clamp(levels[5], 0.1f, 20.0f);
+						params.hf_ratio    = std::clamp(levels[6], 0.01f, 2.0f);
+						params.reflections =
+						    std::clamp(static_cast<int32_t>(values[7]), -10000, 1000);
 						params.reflections_delay = std::clamp(levels[8], 0.0f, 0.3f);
-						params.reverb            = static_cast<int32_t>(values[9]);
-						params.reverb_delay      = std::clamp(levels[10], 0.0f, 0.1f);
+						params.reverb = std::clamp(static_cast<int32_t>(values[9]), -10000, 2000);
+						params.reverb_delay = std::clamp(levels[10], 0.0f, 0.1f);
+						params.hf_reference = std::clamp(levels[13], 20.0f, 20000.0f);
+						params.channel_mask = values[14];
 						voice->reverb.Apply();
 						break;
 					}
