@@ -165,7 +165,7 @@ public:
 	bool Excludes(Value condition, bool positive) {
 		for (uint32_t incoming = 0; incoming < m_induction.NumArgs(); ++incoming) {
 			m_incoming = m_induction.PhiBlock(incoming);
-			m_values[1].clear();
+			m_current  = 1u + incoming;
 			if (Evaluate(condition, true) != (positive ? 0u : 1u)) return false;
 		}
 		return true;
@@ -330,7 +330,7 @@ private:
 		}
 		const auto* inst = value.TryInstruction();
 		if (current && m_exclude_bound && inst == &m_bound) return 0u;
-		auto& values = m_values[current];
+		auto& values = m_values[current ? m_current : 0u];
 		if (const auto found = values.find(inst); found != values.end()) {
 			if (found->second == UINT32_MAX) found->second = Unknown(value.GetType());
 			return found->second;
@@ -395,14 +395,16 @@ private:
 	const Inst& m_induction;
 	const Inst& m_bound;
 	const Block* m_incoming = nullptr;
+	uint32_t m_current = 1;
 	uint32_t m_variables = 0;
 	bool m_exclude_bound = true;
 	std::vector<Node> m_nodes {{}, {}};
 	std::vector<std::pair<Value, uint32_t>> m_literals;
 	using Values = std::unordered_map<const Inst*, uint32_t>;
-	std::array<Values, 2>                                             m_values;
-	std::unordered_map<std::array<uint32_t, 3>, uint32_t, TripleHash> m_nodes_by_key;
-	std::unordered_map<std::array<uint32_t, 3>, uint32_t, TripleHash> m_choices;
+	// The current iteration has one cache per incoming edge.
+	std::array<Values, 3> m_values;
+	std::map<std::array<uint32_t, 3>, uint32_t> m_nodes_by_key;
+	std::map<std::array<uint32_t, 3>, uint32_t> m_choices;
 	std::unordered_map<PredicateKey, uint32_t, PredicateHash>         m_predicates;
 };
 
@@ -1882,16 +1884,21 @@ private:
 			const auto* compare = use_of_key.user;
 			if (use_of_key.operand != 0u ||
 			    !accepts_bound(*compare, initial_arm)) continue;
-			if (!GuardedOnEntry(use != nullptr ? use : increment_block, stops,
-			                    [&](const EdgePredicate& edge) {
-				                    return edge.positive &&
-				                           (lanes == LaneQuantifier::Any || edge.lanes == lanes) &&
-				                           Implies(edge.condition, Value(use_of_key.user));
-			                    }))
-				continue;
+			if (!GuardedOnEntry(use != nullptr ? use : increment_block, stops, [&](const EdgePredicate& edge) {
+				return edge.positive && (lanes == LaneQuantifier::Any || edge.lanes == lanes) &&
+				       Implies(edge.condition, Value(use_of_key.user));
+			})) continue;
 			// The image bound and the increment guard are separate obligations: a
 			// skipped image alone does not prevent signed induction wraparound.
-			if (IncrementGuarded(*phi, *compare, increment_block)) return compare;
+			const auto [found, inserted] = m_loop_proofs.try_emplace(compare);
+			if (inserted) {
+				LoopBoundProof proof(m_program, *phi, *compare);
+				found->second =
+				    GuardedOnEntry(increment_block, stops, [&](const EdgePredicate& edge) {
+					    return proof.Excludes(edge.condition, edge.positive);
+				    });
+			}
+			if (found->second) return compare;
 		}
 		return {};
 	}
@@ -4065,6 +4072,8 @@ private:
 	}
 
 	void PlanIndirectDescriptors() {
+		// Earlier proofs predate rewrites and erasures; planning only adds instructions.
+		m_loop_proofs.clear();
 		for (auto* block: m_program.blocks) {
 			for (auto& inst: *block) {
 				if ((ImageOpcodeInfoOf(inst.GetOpcode()).access == ImageAccess::None &&
@@ -4200,6 +4209,7 @@ private:
 			    image.dimension == memory.image_dimension && image.mip_mode == mip &&
 			    image.depth_compare == depth && image.r128 == memory.image_r128 &&
 			    image.atomic64 == atomic64) {
+				image.cube |= memory.image_cube;
 				image.max_array_index = std::max(image.max_array_index, array_index_bound);
 				Merge(image, op, pc);
 				return i;
@@ -4216,6 +4226,7 @@ private:
 		image.mip_mode       = mip;
 		image.depth_compare  = depth;
 		image.r128           = memory.image_r128;
+		image.cube           = memory.image_cube;
 		image.atomic64       = atomic64;
 		image.max_array_index = array_index_bound;
 		Merge(image, op, pc);
@@ -4845,10 +4856,11 @@ private:
 	std::unordered_map<const Block*, size_t>   m_block_order;
 	std::vector<DescriptorSource>              m_sources;
 	std::vector<HandlePatch>                   m_handle_patches;
-	std::vector<MemoryPatch>                   m_memory_patches;
-	std::vector<IndirectDescriptorPlan>             m_indirect_descriptors;
-	std::map<const Inst*, Value>              m_descriptor_values;
-	bool                                       m_shader_writes = false;
+	std::vector<MemoryPatch>                       m_memory_patches;
+	std::vector<IndirectDescriptorPlan>            m_indirect_descriptors;
+	std::map<const Inst*, Value>                   m_descriptor_values;
+	mutable std::unordered_map<const Inst*, bool>  m_loop_proofs; // By loop-bound comparison.
+	bool                                            m_shader_writes = false;
 	mutable std::map<std::tuple<const Inst*, const Inst*, const Block*>, IncrementGuard>
 	    m_increment_guards;
 };

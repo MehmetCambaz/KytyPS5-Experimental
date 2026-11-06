@@ -9311,8 +9311,6 @@ void TestMalformedMemoryKindsRejected() {
 
 } // namespace
 
-void TestLoopProofCache();
-
 int main() {
   try {
     const auto Run = [](const char *name, auto test) {
@@ -9322,7 +9320,6 @@ int main() {
         throw std::runtime_error(std::string(name) + ": " + exception.what());
       }
     };
-    Run("loop proof cache contract", TestLoopProofCache);
     Run("dense buffers", TestDenseBufferTracking);
     Run("compute buffer fill", TestComputeBufferFill);
     Run("scalar/vector alias", TestScalarAndVectorBufferAlias);

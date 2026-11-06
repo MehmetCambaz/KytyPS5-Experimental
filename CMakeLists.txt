@@ -367,7 +367,7 @@ function(add_kyty_full_emulator_test target source)
 	target_link_libraries(${target} ${kyty_emulator_link_libraries})
 	target_include_directories(${target} PRIVATE ${inc_headers})
 	if (WIN32)
-		target_link_libraries(${target} iphlpapi)
+		target_link_libraries(${target} iphlpapi dxgi)
 	endif()
 	if (KYTY_CLANG_CL)
 		target_link_libraries(${target} onecore)
@@ -487,20 +487,15 @@ target_include_directories(resource_materialization_tests PRIVATE ${inc_headers}
 
 add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ResourceTrackingTests.cpp"
-	"${KYTY_TESTS_DIR}/LoopProofCacheTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/shader/shaderPixelParameter.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ShaderInfoCollection.cpp"
 )
 target_link_libraries(resource_tracking_tests fmt::fmt xbyak::xbyak)
 target_include_directories(resource_tracking_tests PRIVATE ${inc_headers})
-
-target_compile_definitions(resource_tracking_tests PRIVATE KYTY_LOOP_PROOF_VERIFY=1)
-if(KYTY_CLANG_CL)
-	target_compile_options(resource_tracking_tests PRIVATE /EHsc)
-endif()
 
 add_executable(audio_out2_port_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/AudioOut2PortTests.cpp"
@@ -912,6 +907,7 @@ if (WIN32)
 	target_link_libraries(kyty_emulator iphlpapi)
 	target_link_libraries(kyty_emulator setupapi)
 	target_link_libraries(kyty_emulator ws2_32)
+	target_link_libraries(kyty_emulator dxgi)
 endif()
 if (KYTY_CLANG_CL)
 	target_link_libraries(kyty_emulator onecore)

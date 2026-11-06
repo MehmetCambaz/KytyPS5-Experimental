@@ -97,6 +97,7 @@ struct ConfigOptions {
 	bool                   partial_buffer_refresh_enabled = false;
 	bool                   tessellation_enabled        = false;
 	bool                   occlusion_queries_enabled   = false;
+	bool                   lod_stats_enabled           = false;
 	bool                   trophy_enabled              = true;
 	uint32_t               trophy_duration_seconds     = 6;
 	bool                   perf_overlay_enabled            = false;
@@ -177,6 +178,7 @@ bool SkipRedundantUnmapDrainsEnabled();
 bool PartialBufferRefreshEnabled();
 bool TessellationEnabled();
 bool OcclusionQueriesEnabled();
+bool LodStatsEnabled();
 bool TrophyEnabled();
 uint32_t GetTrophyDurationSeconds();
 bool PlayGoHackEnabled();

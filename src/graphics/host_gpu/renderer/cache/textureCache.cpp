@@ -34,7 +34,7 @@ namespace Libs::Graphics {
 
 namespace {
 
-constexpr uint64_t NumFramesBeforeRemoval = 32;
+constexpr uint64_t NumFramesBeforeRemoval = 16;
 // Largest GPU-written tiled image (in texels) that is written back to guest memory on submit.
 constexpr uint64_t SmallTiledReadbackTexels = 64 * 64;
 constexpr uint64_t SmallStorageReadbackBytes = 512 * 1024;
@@ -711,9 +711,6 @@ void TextureCache::CopyImage(ImageId destination_id, ImageId source_id) {
 	const bool dest_depth   = destination.info.IsDepth();
 	const bool direct_copy =
 	    source.info.GetColorTransform() == destination.info.GetColorTransform() &&
-	    (source.backing.image_type == destination.backing.image_type ||
-	     (source.backing.image_type != vk::ImageType::e1D &&
-	      destination.backing.image_type != vk::ImageType::e1D)) &&
 	    (source.backing.format == destination.backing.format ||
 	     (!source_depth && !dest_depth &&
 	      vk::blockSize(source.backing.format) == vk::blockSize(destination.backing.format)));
@@ -918,10 +915,8 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 		BcAlias::Resolve(*this, cached_id, merged_id);
 		return {merged_id};
 	}
-	const auto current_tick = m_scheduler.CurrentTick();
-	const bool safe_to_delete =
-	    current_tick - std::min(current_tick, cached.tick_accessed_last) > NumFramesBeforeRemoval &&
-	    cached.heap_refs.load(std::memory_order_relaxed) == 0u;
+	const bool safe_to_delete = m_gc_tick - cached.tick_accessed_last > NumFramesBeforeRemoval &&
+	                            cached.heap_refs.load(std::memory_order_relaxed) == 0u;
 
 	const uint32_t requested_block = requested.bytes_per_block * requested.samples;
 	const uint32_t cached_block    = cached.info.bytes_per_block * cached.info.samples;
@@ -1458,7 +1453,6 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 			                            !image.IsBufferModified() && !image.IsCpuDirty();
 			// 2D-array attachment views select 2D layers or, of a volume, depth slices.
 			if (m_graphics.conditional_rendering_enabled &&
-			    image.backing.image_type != vk::ImageType::e1D &&
 			    count <= m_graphics.GetPhysicalDeviceProperties().limits.maxFramebufferLayers &&
 			    (image.backing.usage & vk::ImageUsageFlagBits::eColorAttachment) &&
 			    (m_graphics.GetFormatProperties(view.format).optimalTilingFeatures &
@@ -1760,7 +1754,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		if (view_layer >= 0) {
 			desc.view_info.base_layer = static_cast<uint32_t>(view_layer);
 		}
-		image.tick_accessed_last = m_scheduler.CurrentTick();
+		image.tick_accessed_last = m_gc_tick;
 		TouchImage(image);
 	}
 	MaterializeColorClear(result, desc, metadata_base_layer);

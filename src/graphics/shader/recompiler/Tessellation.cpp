@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+#include "graphics/shader/recompiler/frontend/cfg/ShaderCFG.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ConstantPropagation.h"
@@ -29,16 +30,23 @@ struct TessellationAddress {
 // Reflects the LS output stride, or the HS output stride and patch constant range.
 void ReflectTessellationLayout(const Decoder::Program& program, bool local,
                                ShaderTessellationInputInfo& info) {
+	// Registers tracks the VGPRs, then the SGPR codes through VCC_HI.
+	constexpr uint32_t scalars = IR::NumScalarRegs + 2u;
 	using namespace Decoder;
 	using Address   = TessellationAddress;
 	using Kind      = Address::Kind;
-	using Registers = std::array<Address, IR::NumVectorRegs>;
+	using Registers = std::array<Address, IR::NumVectorRegs + scalars>;
 
 	const auto control_points = local ? info.input_control_points : info.output_control_points;
 	Registers  entry {}, registers;
 	entry[local ? 3u : 1u] =
 	    local ? Address {Kind::Affine, 1u, 0u} : Address {Kind::PackedControlPoint};
 	const auto constant = [](uint32_t value) { return Address {Kind::Affine, 0u, value}; };
+	// The packed HS ID holds the patch ordinal in bits 7:0 and the control point ID in bits
+	// 12:8. A single output control point makes each HS lane one patch.
+	const bool single = !local && control_points == 1u;
+	const auto patch  = single ? Address {Kind::Affine, 1u, 0u} : constant(0u);
+	const auto point  = single ? constant(0u) : Address {Kind::Affine, 1u, 0u};
 	// Bit operations are exact on a scaled control-point index (coefficient 2^k, no constant):
 	// the index, below control_points, occupies bits [k, k + index_bits).
 	const uint32_t index_bits =
@@ -76,7 +84,7 @@ void ReflectTessellationLayout(const Decoder::Program& program, bool local,
 			return {Kind::Affine, value.coefficient >> offset, 0u};
 		return {};
 	};
-	const auto read     = [&](const Operand& operand) -> Address {
+	const auto read = [&](const Operand& operand) -> Address {
 		if (operand.absolute || operand.negate || operand.sdwa_sext || operand.op_sel ||
 		    operand.op_sel_hi || operand.negate_hi || operand.dpp)
 			return {};
@@ -86,11 +94,16 @@ void ReflectTessellationLayout(const Decoder::Program& program, bool local,
 			value = constant(operand.value);
 		} else if (operand.kind == OperandKind::Vgpr) {
 			value = registers.at(operand.reg);
+		} else if (uint32_t code = 0; CFG::ScalarOperandCode(operand, code) && code < scalars) {
+			value = registers[IR::NumVectorRegs + code];
 		}
 		// The native packed HS ID holds the patch ordinal in its low byte and the control point
-		// in bits 8-12. The logical interface addresses one patch, as in the frontend's v1
-		// initialization: the ordinal is 0 and the ID is control point * 256.
-		if (value.kind == Kind::PackedControlPoint) value = {Kind::Affine, 256u, 0u};
+		// in bits 8-12. For ordinary control shaders the logical interface addresses one patch;
+		// with one output control point, it instead varies with the patch ordinal.
+		if (value.kind == Kind::PackedControlPoint) {
+			if (operand.sdwa_sel == 0u) return patch;
+			value = single ? patch : Address {Kind::Affine, 256u, 0u};
+		}
 		// SDWA selects: bytes 0-3, words 0-1, or the whole dword.
 		if (operand.sdwa_sel < 4u) return extract(value, 8u * operand.sdwa_sel, 8u);
 		if (operand.sdwa_sel < 6u) return extract(value, 16u * (operand.sdwa_sel - 4u), 16u);
@@ -119,13 +132,10 @@ void ReflectTessellationLayout(const Decoder::Program& program, bool local,
 		                             : Address {};
 	};
 	const auto low24 = [&](Address value) {
-		if (value.kind == Kind::Affine && value.coefficient == 0u)
-			return constant(value.constant & 0xffffffu);
-		return value.kind == Kind::Affine &&
-		               uint64_t {value.coefficient} * (control_points - 1u) + value.constant <=
-		                   0xffffffu
-		           ? value
-		           : Address {};
+		if (value.kind != Kind::Affine) return Address {};
+		if (value.coefficient == 0u) return constant(value.constant & 0xffffffu);
+		const uint64_t maximum = single ? 0xffu : control_points - 1u;
+		return value.coefficient * maximum + value.constant <= 0xffffffu ? value : Address {};
 	};
 	const auto subtract = [&](Address lhs, Address rhs) {
 		return lhs.kind == Kind::Affine && rhs.kind == Kind::Affine &&
@@ -186,17 +196,27 @@ void ReflectTessellationLayout(const Decoder::Program& program, bool local,
 					EXIT("%s tessellation address is not affine at pc 0x%08x\n",
 					     local ? "LS" : "HS", inst.pc);
 				}
-				if (address.coefficient != 0u) {
+				if (static_cast<int32_t>(address.coefficient) > 0) {
 					EXIT_NOT_IMPLEMENTED((address.coefficient & 3u) != 0u ||
 					                     (stride != 0u && stride != address.coefficient));
 					stride = address.coefficient;
 				} else if (control_store) {
-					// Control-point-independent HS outputs are patch constants.
+					// Other HS outputs are patch constants; later patches sit lower in the ring.
 					const auto begin = address.constant + inst.offset;
 					patch_begin      = std::min(patch_begin, begin);
 					patch_end        = std::max(patch_end, begin + 4u * inst.data_dwords);
 				}
 			}
+			// SDWA takes no literal, so S_MOVK_I32 stages factors in SGPRs. Other writes clear
+			// them; a lane mask may span two SGPRs, as in wave64.
+			for (uint32_t code = 0; code < scalars; code++) {
+				auto& scalar = registers[IR::NumVectorRegs + code];
+				if (scalar != Address {} && CFG::MayWriteScalarRegister(inst, code, 64u))
+					scalar = {};
+			}
+			if (uint32_t code = 0; inst.opcode == Opcode::S_MOVK_I32 &&
+			                       CFG::ScalarOperandCode(inst.dst, code) && code < scalars)
+				registers[IR::NumVectorRegs + code] = constant(inst.src0.value);
 			// Store vdata is a source, despite occupying the decoder's dst field.
 			if (local_store || buffer_store || inst.dst.kind != OperandKind::Vgpr) continue;
 			const auto lhs   = read(inst.src0);
@@ -205,24 +225,22 @@ void ReflectTessellationLayout(const Decoder::Program& program, bool local,
 			Address    value;
 			switch (inst.opcode) {
 				case Opcode::V_BFE_U32:
-					if (is_constant(rhs) && is_constant(third))
+					if (single && lhs == patch && is_constant(rhs) && is_constant(third) &&
+					    rhs.constant == 0u && third.constant == 8u) {
+						value = patch;
+					} else if (is_constant(rhs) && is_constant(third)) {
 						value = extract(lhs, rhs.constant & 31u, third.constant & 31u);
+					}
 					break;
 				case Opcode::V_AND_B32: {
-					const auto and_mask = lhs.kind == Kind::PackedControlPoint ? rhs
-					                    : rhs.kind == Kind::PackedControlPoint ? lhs
-					                                                             : Address {};
-					if (and_mask == constant(0xffu)) {
-						value = constant(0u);
-					} else if (and_mask == constant(0x1f00u)) {
-						value = {Kind::Affine, 256u, 0u};
-					} else if (lhs.kind != Kind::PackedControlPoint &&
-					           rhs.kind != Kind::PackedControlPoint) {
-						if (is_constant(lhs)) {
-							value = mask(rhs, lhs.constant);
-						} else if (is_constant(rhs)) {
-							value = mask(lhs, rhs.constant);
-						}
+					const auto operand_mask = is_constant(lhs) ? lhs : is_constant(rhs) ? rhs : Address {};
+					const auto input = is_constant(lhs) ? rhs : lhs;
+					if (single && input == patch && operand_mask == constant(0xffu)) {
+						value = patch;
+					} else if (single && input == patch && operand_mask == constant(0x1f00u)) {
+						value = multiply(point, constant(256u));
+					} else if (operand_mask.kind == Kind::Affine && operand_mask.coefficient == 0u) {
+						value = mask(input, operand_mask.constant);
 					}
 					break;
 				}
@@ -259,7 +277,7 @@ void ReflectTessellationLayout(const Decoder::Program& program, bool local,
 			    inst.dst.dpp)
 				value = {};
 			for (uint32_t index = 0;
-			     index < std::max(inst.data_dwords, 1u) && inst.dst.reg + index < registers.size();
+			     index < std::max(inst.data_dwords, 1u) && inst.dst.reg + index < IR::NumVectorRegs;
 			     index++) {
 				registers[inst.dst.reg + index] = {};
 			}
