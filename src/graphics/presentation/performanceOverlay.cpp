@@ -3,9 +3,11 @@
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/hostStats.h"
+#include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "imgui.h"
 #include "kernel/memory.h"
+#include "kytyGitVersion.h"
 
 #include <algorithm>
 #include <array>
@@ -14,12 +16,17 @@
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <stop_token>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -154,6 +161,135 @@ Common::HostStats           g_host_stats;
 uint64_t                    g_host_generation = 0;
 std::condition_variable_any g_sampler_wait;
 std::jthread                g_sampler;
+
+// The recorder observes guest video-out flips, the same timing source as the panel. It is not a
+// GPU timestamp profiler or a display-latency measurement.
+struct BenchmarkRecorder {
+	std::filesystem::path output_dir;
+	std::ofstream         frames;
+	Clock::time_point     started {};
+	Clock::time_point     last_flip {};
+	std::vector<float>    intervals_ms;
+	uint64_t              slow_50ms  = 0;
+	uint64_t              slow_100ms = 0;
+	uint32_t              guest_width  = 0;
+	uint32_t              guest_height = 0;
+	bool                  active = false;
+
+	static std::optional<double> Percentile(const std::vector<float>& values, double fraction) {
+		if (values.empty()) {
+			return std::nullopt;
+		}
+		auto sorted = values;
+		std::sort(sorted.begin(), sorted.end());
+		const auto rank = static_cast<size_t>(std::ceil(fraction * sorted.size()));
+		return sorted[std::max<size_t>(1, rank) - 1];
+	}
+
+	static void WriteNumberOrNull(std::ofstream& file, const std::optional<double>& value) {
+		if (value) {
+			file << std::fixed << std::setprecision(3) << *value;
+		} else {
+			file << "null";
+		}
+	}
+
+	void Start(const std::filesystem::path& root) noexcept {
+		std::error_code error;
+		const auto stamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+		                       std::chrono::system_clock::now().time_since_epoch())
+		                       .count();
+		output_dir = root / ("run-" + std::to_string(stamp));
+		std::filesystem::create_directories(output_dir, error);
+		if (error) {
+			Log::WriteToConsoleAndLog("Benchmark capture could not create its output folder.\n");
+			return;
+		}
+		frames.open(output_dir / "frames.csv", std::ios::out | std::ios::trunc);
+		if (!frames) {
+			Log::WriteToConsoleAndLog("Benchmark capture could not open frames.csv.\n");
+			return;
+		}
+		frames << "timestamp_ms,frame_time_ms,guest_width,guest_height\n";
+		started = Clock::now();
+		last_flip = {};
+		intervals_ms.clear();
+		slow_50ms = slow_100ms = 0;
+		guest_width = guest_height = 0;
+		active = true;
+		Log::WriteToConsoleAndLog("Benchmark capture started (Ctrl+F3 stops and saves it).\n");
+	}
+
+	void Record(Clock::time_point now, uint32_t width, uint32_t height) noexcept {
+		if (!active) {
+			return;
+		}
+		guest_width = width;
+		guest_height = height;
+		if (last_flip != Clock::time_point {}) {
+			const float ms = std::chrono::duration<float, std::milli>(now - last_flip).count();
+			if (std::isfinite(ms) && ms >= 0.0f) {
+				intervals_ms.push_back(ms);
+				if (ms > 50.0f) {
+					slow_50ms++;
+				}
+				if (ms > 100.0f) {
+					slow_100ms++;
+				}
+				const auto timestamp = std::chrono::duration<float, std::milli>(now - started).count();
+				frames << std::fixed << std::setprecision(3) << timestamp << ',' << ms << ',' << width
+				       << ',' << height << '\n';
+				// Keep a forced process termination from losing more than about one second at 60 FPS.
+				if (intervals_ms.size() % 60 == 0) {
+					frames.flush();
+				}
+			}
+		}
+		last_flip = now;
+	}
+
+	void Stop() noexcept {
+		if (!active) {
+			return;
+		}
+		frames.flush();
+		frames.close();
+		const double total_ms = std::accumulate(intervals_ms.begin(), intervals_ms.end(), 0.0);
+		const auto average_fps = total_ms > 0.0
+		                             ? std::optional<double>(intervals_ms.size() * 1000.0 / total_ms)
+		                             : std::nullopt;
+		std::ofstream summary(output_dir / "summary.json", std::ios::out | std::ios::trunc);
+		if (summary) {
+			summary << "{\n"
+			        << "  \"metric_source\": \"main-bus guest video-out flip intervals\",\n"
+			        << "  \"build_git_revision\": \"" KYTY_GIT_REVISION "\",\n"
+			        << "  \"frame_interval_count\": " << intervals_ms.size() << ",\n"
+			        << "  \"measured_duration_ms\": " << std::fixed << std::setprecision(3) << total_ms
+			        << ",\n  \"average_fps\": ";
+			WriteNumberOrNull(summary, average_fps);
+			summary << ",\n  \"median_frame_time_ms\": ";
+			WriteNumberOrNull(summary, Percentile(intervals_ms, 0.50));
+			summary << ",\n  \"p95_frame_time_ms\": ";
+			WriteNumberOrNull(summary, Percentile(intervals_ms, 0.95));
+			summary << ",\n  \"p99_frame_time_ms\": ";
+			WriteNumberOrNull(summary, Percentile(intervals_ms, 0.99));
+			const double minutes = total_ms / 60000.0;
+			summary << ",\n  \"slow_frames_over_50ms\": " << slow_50ms
+			        << ",\n  \"slow_frames_over_100ms\": " << slow_100ms
+			        << ",\n  \"slow_frames_over_50ms_per_minute\": "
+			        << (minutes > 0.0 ? slow_50ms / minutes : 0.0)
+			        << ",\n  \"slow_frames_over_100ms_per_minute\": "
+			        << (minutes > 0.0 ? slow_100ms / minutes : 0.0)
+			        << ",\n  \"last_guest_size\": { \"width\": " << guest_width
+			        << ", \"height\": " << guest_height << " }\n}\n";
+		}
+		active = false;
+		Log::WriteToConsoleAndLog("Benchmark capture saved.\n");
+	}
+};
+
+std::mutex        g_benchmark_mutex;
+BenchmarkRecorder g_benchmark;
 
 void SetOverlayEnabled(bool enabled) {
 	{
@@ -752,13 +888,37 @@ void DrawMemoryAndIo(const Snapshot& shown) {
 } // namespace
 
 void PerformanceOverlayRecordFlip(uint32_t guest_width, uint32_t guest_height) noexcept {
+	const auto now = Clock::now();
+	{
+		std::scoped_lock lock(g_benchmark_mutex);
+		g_benchmark.Record(now, guest_width, guest_height);
+	}
 	if (!Common::DebugCounters::Enabled()) {
 		return;
 	}
 	std::scoped_lock lock(g_frame_mutex);
-	g_frames.Record(Clock::now(), ReadCounters());
+	g_frames.Record(now, ReadCounters());
 	g_frames.guest_width  = guest_width;
 	g_frames.guest_height = guest_height;
+}
+
+void ToggleBenchmarkRecording() noexcept {
+	std::scoped_lock lock(g_benchmark_mutex);
+	if (g_benchmark.active) {
+		g_benchmark.Stop();
+	} else {
+		g_benchmark.Start(Config::GetBenchmarkOutputFolder());
+	}
+}
+
+void StopBenchmarkRecording() noexcept {
+	std::scoped_lock lock(g_benchmark_mutex);
+	g_benchmark.Stop();
+}
+
+bool BenchmarkRecordingActive() noexcept {
+	std::scoped_lock lock(g_benchmark_mutex);
+	return g_benchmark.active;
 }
 
 bool PerformanceOverlayEnabled() noexcept {

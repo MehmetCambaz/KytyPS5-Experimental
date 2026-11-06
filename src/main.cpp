@@ -90,6 +90,7 @@ static void PrintUsage() {
 	::printf(
 	    "  --trophy-duration <seconds>          Trophy toast duration, 5-10. Default: 6.\n");
 	::printf("  --perf-overlay                       Show the performance panel (F2 or Cmd+P).\n");
+	::printf("  --benchmark-output <path>            Local folder for Ctrl+F3 gameplay captures. Default: _Benchmarks.\n");
 	::printf("  --playgo-hack                       Use the supplied PlayGo stub fallback.\n");
 	::printf("  --skip-notice-screen                 Skip startup logos and notices in supported games.\n");
 	::printf(
@@ -416,6 +417,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--printf-output-file") {
 			options.config.printf_output_file = Common::PathFromUtf8(value);
+		} else if (arg == "--benchmark-output") {
+			if (value.empty()) {
+				::printf("invalid benchmark output folder\n");
+				return false;
+			}
+			options.config.benchmark_output_folder =
+			    Common::PathFromUtf8(Common::FixFilenameSlash(value));
 		} else if (arg == "--keymap") {
 			const auto split = value.find('=');
 			if (split == std::string::npos || split == 0 || split + 1 == value.size()) {

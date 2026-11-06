@@ -12,6 +12,7 @@
 #include "common/systemInfo.h"
 #include "common/threads.h"
 #include "graphics/presentation/systemOverlay.h"
+#include "graphics/presentation/performanceOverlay.h"
 #include "graphics/presentation/window.h"
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
@@ -136,6 +137,7 @@ static void Execute(const std::filesystem::path& game_patch) {
 		Common::Singleton<Loader::RuntimeLinker>::Instance()->Execute(game_patch);
 	}).detach();
 	Libs::Graphics::WindowRun();
+	Libs::Graphics::StopBenchmarkRecording();
 	std::quick_exit(0);
 }
 

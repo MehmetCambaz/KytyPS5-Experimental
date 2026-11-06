@@ -245,6 +245,10 @@ uint32_t GetTrophyDurationSeconds() {
 	return std::clamp(g_config->trophy_duration_seconds, 5u, 10u);
 }
 
+std::filesystem::path GetBenchmarkOutputFolder() {
+	return g_config->benchmark_output_folder;
+}
+
 uint32_t UnrealScreenPercentage() {
 	const auto percentage = g_config->unreal_screen_percentage;
 	return percentage >= 10 && percentage <= 200 ? percentage : 0;

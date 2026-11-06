@@ -12,6 +12,12 @@ struct GraphicContext;
 // Called for each main-bus guest flip, with the guest's video-out size.
 void PerformanceOverlayRecordFlip(uint32_t guest_width, uint32_t guest_height) noexcept;
 
+// Starts or stops a local gameplay capture. Ctrl+F3 invokes this from the window.
+// Captures contain raw guest video-out flip intervals and a summary in the configured local folder.
+void ToggleBenchmarkRecording() noexcept;
+void StopBenchmarkRecording() noexcept;
+[[nodiscard]] bool BenchmarkRecordingActive() noexcept;
+
 [[nodiscard]] bool PerformanceOverlayEnabled() noexcept;
 void               TogglePerformanceOverlay() noexcept;
 // Switches between the compact and the detailed panel, showing the panel if it was hidden.

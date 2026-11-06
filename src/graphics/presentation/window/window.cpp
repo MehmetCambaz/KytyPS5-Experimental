@@ -497,6 +497,12 @@ void WindowContext::ProcessEvent(double time_s) {
 					Controller::CycleKeyboardPlayer();
 				}
 				return;
+			case SDLK_F3:
+				if (pressed && (event->key.mod & SDL_KMOD_CTRL) != 0) {
+					ToggleBenchmarkRecording();
+					return;
+				}
+				break;
 #if defined(__APPLE__)
 			case SDLK_P:
 				if ((event->key.mod & SDL_KMOD_GUI) == 0) {
